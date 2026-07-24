@@ -117,6 +117,10 @@ if(ONEDNN_STATIC)
     ExternalProject_Get_Property(oneDNN_build SOURCE_DIR BINARY_DIR)
     set(ONEDNN_BINARY_DIR "${BINARY_DIR}")
 
+    # Pre-create the binary include dir so CMake's import-target validation
+    # passes at configure time. The ExternalProject populates it during build.
+    file(MAKE_DIRECTORY "${ONEDNN_BINARY_DIR}/include")
+
     # ── Import the static library as DNNL::dnnl ──
     # Include paths: source headers + build-generated (dnnl_config.h).
     # Library: from build tree (INSTALL_COMMAND is empty).
