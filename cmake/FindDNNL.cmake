@@ -54,6 +54,7 @@ if(ONEDNN_STATIC)
     message(STATUS "oneDNN: building from source (static) at ${ONEDNN_SRC_DIR}")
 
     # ── Build command with parallelism (matches PyTorch) ──
+    include(ProcessorCount)
     set(DNNL_MAKE_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release --parallel)
     ProcessorCount(_proc_cnt)
     if(DEFINED ENV{MAX_JOBS} AND "$ENV{MAX_JOBS}" LESS_EQUAL ${_proc_cnt})
