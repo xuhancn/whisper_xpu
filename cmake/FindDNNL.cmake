@@ -95,6 +95,7 @@ if(ONEDNN_STATIC)
             -DNNL_ENABLE_CONCURRENT_EXEC=ON
             -DNNL_EXPERIMENTAL=ON
             -DCMAKE_INSTALL_PREFIX=${ONEDNN_INSTALL_DIR}
+            -DCMAKE_CXX_FLAGS=/MP
         BUILD_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release --parallel
         BUILD_BYPRODUCTS
             "${ONEDNN_INSTALL_DIR}/lib/dnnl.lib"
