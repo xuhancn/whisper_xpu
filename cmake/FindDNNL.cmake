@@ -69,6 +69,8 @@ if(ONEDNN_STATIC)
         if("${_dnnl_host_cxx}" STREQUAL "")
             set(_dnnl_host_cxx "cl")
         endif()
+        # Point oneDNN to the IntelSYCL cmake config so it detects SYCL
+        set(_intel_sycl_dir "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/lib/cmake/IntelSYCL")
         set(_dnnl_cmake_gen
             CMAKE_GENERATOR          "${CMAKE_GENERATOR}"
             CMAKE_GENERATOR_PLATFORM "${CMAKE_GENERATOR_PLATFORM}"
@@ -104,6 +106,8 @@ if(ONEDNN_STATIC)
             -DNNL_EXPERIMENTAL=ON
             -DONEDNN_BUILD_GRAPH=ON
             -DNNL_DPCPP_HOST_COMPILER=${_dnnl_host_cxx}
+            -DIntelSYCL_DIR=${_intel_sycl_dir}
+            -DDNNL_WITH_SYCL=ON
             -DCMAKE_CXX_FLAGS=${_dnnl_cxx_flags}
         BUILD_COMMAND ${_dnnl_build_cmd}
         INSTALL_COMMAND ""
