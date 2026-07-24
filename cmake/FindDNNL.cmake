@@ -69,8 +69,14 @@ if(ONEDNN_STATIC)
         if("${_dnnl_host_cxx}" STREQUAL "")
             set(_dnnl_host_cxx "cl")
         endif()
-        # Point oneDNN to the IntelSYCL cmake config so it detects SYCL
-        set(_intel_sycl_dir "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/lib/cmake/IntelSYCL")
+        # Derive IntelSYCL_DIR from the already-detected SYCL compiler
+        # (FindSYCLToolkit.cmake sets SYCL_COMPILER to the full icx path).
+        if(DEFINED SYCL_COMPILER)
+            get_filename_component(_sycl_root "${SYCL_COMPILER}/../.." ABSOLUTE)
+            set(_intel_sycl_dir "${_sycl_root}/lib/cmake/IntelSYCL")
+        else()
+            set(_intel_sycl_dir "")
+        endif()
         set(_dnnl_cmake_gen
             CMAKE_GENERATOR          "${CMAKE_GENERATOR}"
             CMAKE_GENERATOR_PLATFORM "${CMAKE_GENERATOR_PLATFORM}"
