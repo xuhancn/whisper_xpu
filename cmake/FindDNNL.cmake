@@ -53,19 +53,17 @@ if(ONEDNN_STATIC)
 
     message(STATUS "oneDNN: building from source (static) at ${ONEDNN_SRC_DIR}")
 
-    # ── Build command with parallelism (matches PyTorch) ──
+    # ── Parallelism ──
     include(ProcessorCount)
-    set(DNNL_MAKE_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release --parallel)
     ProcessorCount(_proc_cnt)
     if(DEFINED ENV{MAX_JOBS} AND "$ENV{MAX_JOBS}" LESS_EQUAL ${_proc_cnt})
-        set(DNNL_MAKE_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release --parallel "$ENV{MAX_JOBS}")
+        set(_jobs "$ENV{MAX_JOBS}")
+    else()
+        set(_jobs "${_proc_cnt}")
     endif()
     unset(_proc_cnt)
 
     # ── Build-system arguments ──
-    # Align generator to parent (Visual Studio on Windows). Set CXX to icx
-    # for SYCL device code; DNNL_DPCPP_HOST_COMPILER keeps the host part of
-    # DPC++ compatible with the parent CXX (MSVC).
     if(WIN32)
         get_property(_dnnl_host_cxx CACHE CMAKE_CXX_COMPILER PROPERTY VALUE)
         if("${_dnnl_host_cxx}" STREQUAL "")
@@ -75,11 +73,15 @@ if(ONEDNN_STATIC)
             CMAKE_GENERATOR          "${CMAKE_GENERATOR}"
             CMAKE_GENERATOR_PLATFORM "${CMAKE_GENERATOR_PLATFORM}"
         )
+        set(_dnnl_cxx_flags "/MP")
+        set(_dnnl_build_cmd "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release --parallel ${_jobs})
     else()
         set(_dnnl_cmake_gen
             CMAKE_CXX_COMPILER "icpx"
             CMAKE_C_COMPILER   "icpx"
         )
+        set(_dnnl_cxx_flags "")
+        set(_dnnl_build_cmd "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release -j ${_jobs})
     endif()
 
     # ── oneDNN build configuration (matches PyTorch) ──
@@ -102,8 +104,8 @@ if(ONEDNN_STATIC)
             -DNNL_EXPERIMENTAL=ON
             -DONEDNN_BUILD_GRAPH=ON
             -DNNL_DPCPP_HOST_COMPILER=${_dnnl_host_cxx}
-            -DCMAKE_CXX_FLAGS=/MP
-        BUILD_COMMAND ${DNNL_MAKE_COMMAND}
+            -DCMAKE_CXX_FLAGS=${_dnnl_cxx_flags}
+        BUILD_COMMAND ${_dnnl_build_cmd}
         INSTALL_COMMAND ""
     )
 
