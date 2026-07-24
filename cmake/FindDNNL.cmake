@@ -52,25 +52,20 @@ if(ONEDNN_STATIC)
     message(STATUS "oneDNN: building from source (static) at ${ONEDNN_SRC_DIR}")
 
     # ── Build-system arguments ──
-    # On Windows with Visual Studio, use the VS generator with the Intel C++
-    # Compiler toolset so SYCL GPU code compiles.  On Linux / Ninja, pass
-    # CMAKE_CXX_COMPILER=icpx directly.
+    # Use Ninja + icx so oneDNN's SYCL detection works reliably.
+    # The Visual Studio generator with Intel toolset doesn't properly
+    # enable oneDNN's GPU backend (SYCL interop symbols missing).
+    # Ninja + icx correctly compiles oneDNN's GPU SYCL code.
     if(WIN32)
-        if(CMAKE_GENERATOR MATCHES "Visual Studio")
-            set(_dnnl_cmake_gen
-                CMAKE_GENERATOR             "${CMAKE_GENERATOR}"
-                CMAKE_GENERATOR_PLATFORM    "${CMAKE_GENERATOR_PLATFORM}"
-                CMAKE_GENERATOR_TOOLSET     "Intel C++ Compiler 2025"
-            )
-        else()
-            set(_dnnl_cmake_gen
-                CMAKE_GENERATOR         "Ninja"
-                CMAKE_CXX_COMPILER      "icx"
-            )
-        endif()
+        set(_dnnl_cmake_gen
+            CMAKE_GENERATOR     "Ninja"
+            CMAKE_CXX_COMPILER  "icx"
+            CMAKE_C_COMPILER    "icx"
+        )
     else()
         set(_dnnl_cmake_gen
             CMAKE_CXX_COMPILER "icpx"
+            CMAKE_C_COMPILER   "icpx"
         )
     endif()
 
