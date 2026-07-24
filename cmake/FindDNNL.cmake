@@ -124,6 +124,9 @@ if(ONEDNN_STATIC)
             -DONEDNN_BUILD_GRAPH=ON
             -DDNNL_LIBRARY_TYPE=STATIC
             -DDNNL_DPCPP_HOST_COMPILER=${_dnnl_host_compiler}
+            # Skip the -fsycl flag check — icx-cl supports it but cmake's
+            # try_compile fails under VS generator + Intel toolset.
+            -DSYCL_FLAG_SUPPORTED=TRUE
         BUILD_COMMAND ${_dnnl_build_cmd}
         BUILD_BYPRODUCTS "<BINARY_DIR>/src/${DNNL_LIB_NAME}"
         INSTALL_COMMAND ""
