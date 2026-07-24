@@ -53,7 +53,7 @@ if(ONEDNN_STATIC)
 
     message(STATUS "oneDNN: building from source (static) at ${ONEDNN_SRC_DIR}")
 
-    # ── Parallelism ──
+    # ── Parallelism (matches PyTorch) ──
     include(ProcessorCount)
     ProcessorCount(_proc_cnt)
     if(DEFINED ENV{MAX_JOBS} AND "$ENV{MAX_JOBS}" LESS_EQUAL ${_proc_cnt})
@@ -63,56 +63,45 @@ if(ONEDNN_STATIC)
     endif()
     unset(_proc_cnt)
 
-    # ── Build-system arguments ──
-    if(WIN32)
-        # When using Visual Studio generator, the compiler is selected via
-        # the platform toolset, not CMAKE_CXX_COMPILER.  The oneAPI setvars
-        # registers "Intel C++ Compiler 2025", so oneDNN's cmake finds the
-        # IntelSYCL package automatically via the inherited environment.
-        set(_dnnl_cmake_gen
-            CMAKE_GENERATOR          "${CMAKE_GENERATOR}"
-            CMAKE_GENERATOR_PLATFORM "${CMAKE_GENERATOR_PLATFORM}"
-            CMAKE_GENERATOR_TOOLSET  "Intel C++ Compiler 2025"
-        )
-        set(_dnnl_cxx_flags "/MP")
-        set(_dnnl_build_cmd "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release --parallel ${_jobs})
-    else()
-        set(_dnnl_cmake_gen
-            CMAKE_CXX_COMPILER "icpx"
-            CMAKE_C_COMPILER   "icpx"
-        )
-        set(_dnnl_cxx_flags "")
-        set(_dnnl_build_cmd "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release -j ${_jobs})
+    # ── Build command (matches PyTorch FindMKLDNN.cmake) ──
+    set(_dnnl_build_cmd "${CMAKE_COMMAND}" --build <BINARY_DIR> --parallel ${_jobs})
+    if(CMAKE_GENERATOR MATCHES "Make|Ninja")
+        list(APPEND _dnnl_build_cmd "--" "-l" ${_jobs})
     endif()
 
-    # ── oneDNN build configuration (matches PyTorch) ──
-    # DNNL_CPU_RUNTIME=NONE  → no CPU backend
-    # DNNL_GPU_RUNTIME=SYCL  → GPU via SYCL
-    # INSTALL_COMMAND ""     → build in-place, reference BINARY_DIR
-    ExternalProject_Add(oneDNN_build
-        SOURCE_DIR        "${ONEDNN_SRC_DIR}"
-        PREFIX            "${ONEDNN_PREFIX}"
-        ${_dnnl_cmake_gen}
-        CMAKE_ARGS
-            -DNNL_LIBRARY_TYPE=STATIC
-            -DNNL_GPU_RUNTIME=SYCL
-            -DNNL_CPU_RUNTIME=NONE
-            -DNNL_BUILD_TESTS=OFF
-            -DNNL_BUILD_EXAMPLES=OFF
-            -DNNL_ENABLE_CONCURRENT_EXEC=ON
-            -DNNL_EXPERIMENTAL=ON
-            -DONEDNN_BUILD_GRAPH=ON
-            -DCMAKE_CXX_FLAGS=${_dnnl_cxx_flags}
-        BUILD_COMMAND ${_dnnl_build_cmd}
-        INSTALL_COMMAND ""
-    )
-
-    # ── Determine library name ──
+    # ── Compiler selection ──
+    # PyTorch: -DCMAKE_CXX_COMPILER=icx (Windows) / icpx (Linux)
+    # DNNL_DPCPP_HOST_COMPILER=DEFAULT lets DPC++ find the host compiler.
     if(WIN32)
+        set(_dnnl_cxx_driver "icx")
+        set(_dnnl_host_compiler "DEFAULT")
         set(DNNL_LIB_NAME "dnnl.lib")
     else()
+        set(_dnnl_cxx_driver "icpx")
+        set(_dnnl_host_compiler "g++")
         set(DNNL_LIB_NAME "libdnnl.a")
     endif()
+
+    # ── oneDNN build (copied from PyTorch FindMKLDNN.cmake) ──
+    ExternalProject_Add(oneDNN_build
+        SOURCE_DIR      "${ONEDNN_SRC_DIR}"
+        PREFIX          "${ONEDNN_PREFIX}"
+        CMAKE_GENERATOR "${CMAKE_GENERATOR}"
+        CMAKE_GENERATOR_PLATFORM "${CMAKE_GENERATOR_PLATFORM}"
+        CMAKE_ARGS
+            -DCMAKE_C_COMPILER=${_dnnl_cxx_driver}
+            -DCMAKE_CXX_COMPILER=${_dnnl_cxx_driver}
+            -DDNNL_GPU_RUNTIME=SYCL
+            -DDNNL_CPU_RUNTIME=THREADPOOL
+            -DDNNL_BUILD_TESTS=OFF
+            -DDNNL_BUILD_EXAMPLES=OFF
+            -DONEDNN_BUILD_GRAPH=ON
+            -DDNNL_LIBRARY_TYPE=STATIC
+            -DDNNL_DPCPP_HOST_COMPILER=${_dnnl_host_compiler}
+        BUILD_COMMAND ${_dnnl_build_cmd}
+        BUILD_BYPRODUCTS "<BINARY_DIR>/src/${DNNL_LIB_NAME}"
+        INSTALL_COMMAND ""
+    )
 
     ExternalProject_Get_Property(oneDNN_build SOURCE_DIR BINARY_DIR)
     set(ONEDNN_BINARY_DIR "${BINARY_DIR}")
@@ -121,15 +110,14 @@ if(ONEDNN_STATIC)
     # passes at configure time. The ExternalProject populates it during build.
     file(MAKE_DIRECTORY "${ONEDNN_BINARY_DIR}/include")
 
-    # ── Import the static library as DNNL::dnnl ──
-    # Include paths: source headers + build-generated (dnnl_config.h).
-    # Library: from build tree (INSTALL_COMMAND is empty).
-    # Note: VS multi-config generator puts output in Release/ subdir.
+    # ── Import the static library (matches PyTorch) ──
+    # PyTorch: ${BINARY_DIR}/src/dnnl.lib (no config subdir)
+    # Includes: ${SOURCE_DIR}/include ${BINARY_DIR}/include
     add_library(DNNL::dnnl STATIC IMPORTED GLOBAL)
     set_target_properties(DNNL::dnnl PROPERTIES
-        IMPORTED_LOCATION             "${ONEDNN_BINARY_DIR}/src/Release/${DNNL_LIB_NAME}"
+        IMPORTED_LOCATION             "${ONEDNN_BINARY_DIR}/src/${DNNL_LIB_NAME}"
         IMPORTED_CONFIGURATIONS       "RELEASE"
-        IMPORTED_LOCATION_RELEASE     "${ONEDNN_BINARY_DIR}/src/Release/${DNNL_LIB_NAME}"
+        IMPORTED_LOCATION_RELEASE     "${ONEDNN_BINARY_DIR}/src/${DNNL_LIB_NAME}"
         INTERFACE_INCLUDE_DIRECTORIES "${ONEDNN_SRC_DIR}/include;${ONEDNN_BINARY_DIR}/include"
         INTERFACE_LINK_LIBRARIES      "OpenCL.lib;sycl.lib"
     )
