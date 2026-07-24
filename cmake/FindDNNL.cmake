@@ -19,8 +19,11 @@
 
 # ── Guard against double processing ──
 # This module is both included from the root CMakeLists.txt and found
-# via find_package(DNNL) inside ggml-sycl's cmake. Skip if already done.
-if(DEFINED DNNL_FOUND AND DNNL_FOUND)
+# via find_package(DNNL) inside ggml-sycl's cmake. Skip if the target
+# already exists (within a single configure run).
+# NOTE: we check TARGET not DNNL_FOUND because the cache variable
+# persists across re-configures but targets do not.
+if(TARGET DNNL::dnnl)
     return()
 endif()
 
@@ -74,6 +77,10 @@ if(ONEDNN_STATIC)
     # ── oneDNN build configuration ──
     # DNNL_CPU_RUNTIME=THREADPOOL avoids pulling in TBB.
     # DNNL_GPU_RUNTIME=SYCL enables SYCL GPU acceleration.
+    #
+    # --parallel is safe here because /MP is only applied to MSVC targets
+    # (via generator expression), so icx-cl (Intel compiler) for oneDNN
+    # won't receive conflicting flags.
     ExternalProject_Add(oneDNN_build
         SOURCE_DIR        "${ONEDNN_SRC_DIR}"
         PREFIX            "${CMAKE_BINARY_DIR}/oneDNN"
@@ -88,6 +95,7 @@ if(ONEDNN_STATIC)
             -DNNL_ENABLE_CONCURRENT_EXEC=ON
             -DNNL_EXPERIMENTAL=ON
             -DCMAKE_INSTALL_PREFIX=${ONEDNN_INSTALL_DIR}
+        BUILD_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release --parallel
         BUILD_BYPRODUCTS
             "${ONEDNN_INSTALL_DIR}/lib/dnnl.lib"
     )

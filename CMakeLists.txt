@@ -12,6 +12,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 
+# Multi-process compilation for MSVC targets only.
+# /MP compiles multiple source files in parallel within a single project.
+# Intel C++ targets (SYCL) are excluded — icx-cl rejects /MP with -fsycl.
+add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/MP>)
+
 # ── SYCL toolchain detection ──
 # FindSYCLToolkit locates the Intel oneAPI installation (compiler, headers, libs).
 include(cmake/FindSYCLToolkit.cmake)
