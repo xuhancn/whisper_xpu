@@ -1,0 +1,9 @@
+[submodule "third_party/whisper.cpp"]
+	path = third_party/whisper.cpp
+	url = https://github.com/ggml-org/whisper.cpp
+[submodule "third_party/wxWidgets"]
+	path = third_party/wxWidgets
+	url = https://github.com/wxWidgets/wxWidgets
+[submodule "third_party/portaudio"]
+	path = third_party/portaudio
+	url = https://github.com/PortAudio/portaudio
