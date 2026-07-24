@@ -37,11 +37,13 @@ option(ONEDNN_STATIC "Link oneDNN as static library (build from source)" ON)
 if(ONEDNN_STATIC)
     # ═══════════════════════════════════════════════════════════════
     #  MODE 1: Static linking — build oneDNN from source
+    #  Approach matches PyTorch's FindMKLDNN.cmake:
+    #  https://github.com/pytorch/pytorch/blob/0cfa492631cca99c2aa4161ec67035fcda976869/cmake/Modules/FindMKLDNN.cmake
     # ═══════════════════════════════════════════════════════════════
     include(ExternalProject)
 
     set(ONEDNN_SRC_DIR "${CMAKE_SOURCE_DIR}/third_party/oneDNN")
-    set(ONEDNN_INSTALL_DIR "${CMAKE_BINARY_DIR}/oneDNN_install")
+    set(ONEDNN_PREFIX  "${CMAKE_BINARY_DIR}/oneDNN")
 
     if(NOT EXISTS "${ONEDNN_SRC_DIR}/CMakeLists.txt")
         message(FATAL_ERROR
@@ -51,16 +53,26 @@ if(ONEDNN_STATIC)
 
     message(STATUS "oneDNN: building from source (static) at ${ONEDNN_SRC_DIR}")
 
+    # ── Build command with parallelism (matches PyTorch) ──
+    set(DNNL_MAKE_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release --parallel)
+    ProcessorCount(_proc_cnt)
+    if(DEFINED ENV{MAX_JOBS} AND "$ENV{MAX_JOBS}" LESS_EQUAL ${_proc_cnt})
+        set(DNNL_MAKE_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release --parallel "$ENV{MAX_JOBS}")
+    endif()
+    unset(_proc_cnt)
+
     # ── Build-system arguments ──
-    # Use Ninja + icx so oneDNN's SYCL detection works reliably.
-    # The Visual Studio generator with Intel toolset doesn't properly
-    # enable oneDNN's GPU backend (SYCL interop symbols missing).
-    # Ninja + icx correctly compiles oneDNN's GPU SYCL code.
+    # Align generator to parent (Visual Studio on Windows). Set CXX to icx
+    # for SYCL device code; DNNL_DPCPP_HOST_COMPILER keeps the host part of
+    # DPC++ compatible with the parent CXX (MSVC).
     if(WIN32)
+        get_property(_dnnl_host_cxx CACHE CMAKE_CXX_COMPILER PROPERTY VALUE)
+        if("${_dnnl_host_cxx}" STREQUAL "")
+            set(_dnnl_host_cxx "cl")
+        endif()
         set(_dnnl_cmake_gen
-            CMAKE_GENERATOR     "Ninja"
-            CMAKE_CXX_COMPILER  "icx"
-            CMAKE_C_COMPILER    "icx"
+            CMAKE_GENERATOR          "${CMAKE_GENERATOR}"
+            CMAKE_GENERATOR_PLATFORM "${CMAKE_GENERATOR_PLATFORM}"
         )
     else()
         set(_dnnl_cmake_gen
@@ -69,57 +81,56 @@ if(ONEDNN_STATIC)
         )
     endif()
 
-    # ── oneDNN build configuration ──
-    # DNNL_CPU_RUNTIME=THREADPOOL avoids pulling in TBB.
-    # DNNL_GPU_RUNTIME=SYCL enables SYCL GPU acceleration.
-    #
-    # --parallel is safe here because /MP is only applied to MSVC targets
-    # (via generator expression), so icx-cl (Intel compiler) for oneDNN
-    # won't receive conflicting flags.
+    # ── oneDNN build configuration (matches PyTorch) ──
+    # DNNL_CPU_RUNTIME=NONE  → no CPU backend
+    # DNNL_GPU_RUNTIME=SYCL  → GPU via SYCL
+    # INSTALL_COMMAND ""     → build in-place, reference BINARY_DIR
     ExternalProject_Add(oneDNN_build
         SOURCE_DIR        "${ONEDNN_SRC_DIR}"
-        PREFIX            "${CMAKE_BINARY_DIR}/oneDNN"
-        INSTALL_DIR       "${ONEDNN_INSTALL_DIR}"
+        PREFIX            "${ONEDNN_PREFIX}"
         ${_dnnl_cmake_gen}
         CMAKE_ARGS
+            -DCMAKE_CXX_COMPILER=icx
+            -DCMAKE_C_COMPILER=icx
             -DNNL_LIBRARY_TYPE=STATIC
             -DNNL_GPU_RUNTIME=SYCL
-            -DNNL_CPU_RUNTIME=THREADPOOL
+            -DNNL_CPU_RUNTIME=NONE
             -DNNL_BUILD_TESTS=OFF
             -DNNL_BUILD_EXAMPLES=OFF
             -DNNL_ENABLE_CONCURRENT_EXEC=ON
             -DNNL_EXPERIMENTAL=ON
-            -DCMAKE_INSTALL_PREFIX=${ONEDNN_INSTALL_DIR}
+            -DONEDNN_BUILD_GRAPH=ON
+            -DNNL_DPCPP_HOST_COMPILER=${_dnnl_host_cxx}
             -DCMAKE_CXX_FLAGS=/MP
-        BUILD_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release --parallel
-        BUILD_BYPRODUCTS
-            "${ONEDNN_INSTALL_DIR}/lib/dnnl.lib"
+        BUILD_COMMAND ${DNNL_MAKE_COMMAND}
+        INSTALL_COMMAND ""
     )
 
+    # ── Determine library name ──
+    if(WIN32)
+        set(DNNL_LIB_NAME "dnnl.lib")
+    else()
+        set(DNNL_LIB_NAME "libdnnl.a")
+    endif()
+
+    ExternalProject_Get_Property(oneDNN_build SOURCE_DIR BINARY_DIR)
+    set(ONEDNN_BINARY_DIR "${BINARY_DIR}")
+
     # ── Import the static library as DNNL::dnnl ──
-    # Set both generic IMPORTED_LOCATION and per-config locations
-    # because ggml-sycl's cmake iterates IMPORTED_CONFIGURATIONS
-    # and reads each per-config location.
-    #
-    # Pre-create the install include directory so CMake's import-target
-    # validation passes at configure time (the ExternalProject only
-    # populates it during build).
-    file(MAKE_DIRECTORY "${ONEDNN_INSTALL_DIR}/include/oneapi/dnnl")
+    # Include paths: source headers + build-generated (dnnl_config.h).
+    # Library: from build tree (INSTALL_COMMAND is empty).
     add_library(DNNL::dnnl STATIC IMPORTED GLOBAL)
     set_target_properties(DNNL::dnnl PROPERTIES
-        IMPORTED_LOCATION             "${ONEDNN_INSTALL_DIR}/lib/dnnl.lib"
+        IMPORTED_LOCATION             "${ONEDNN_BINARY_DIR}/src/${DNNL_LIB_NAME}"
         IMPORTED_CONFIGURATIONS       "RELEASE"
-        IMPORTED_LOCATION_RELEASE     "${ONEDNN_INSTALL_DIR}/lib/dnnl.lib"
-        # Source headers (dnnl.hpp etc.) + install (generated dnnl_config.h)
-        INTERFACE_INCLUDE_DIRECTORIES "${ONEDNN_SRC_DIR}/include;${ONEDNN_INSTALL_DIR}/include"
+        IMPORTED_LOCATION_RELEASE     "${ONEDNN_BINARY_DIR}/src/${DNNL_LIB_NAME}"
+        INTERFACE_INCLUDE_DIRECTORIES "${ONEDNN_SRC_DIR}/include;${ONEDNN_BINARY_DIR}/include"
         INTERFACE_LINK_LIBRARIES      "OpenCL.lib;sycl.lib"
     )
     add_dependencies(DNNL::dnnl oneDNN_build)
-
     set(DNNL_FOUND TRUE)
-    set(DNNLROOT "${ONEDNN_INSTALL_DIR}")
     message(STATUS "Found oneDNN: static build (DNNL::dnnl)")
-    message(STATUS "Found oneDNN: library at ${ONEDNN_INSTALL_DIR}/lib/dnnl.lib")
+    message(STATUS "Found oneDNN: library at ${ONEDNN_BINARY_DIR}/src/${DNNL_LIB_NAME}")
 
 else()
     # ═══════════════════════════════════════════════════════════════
