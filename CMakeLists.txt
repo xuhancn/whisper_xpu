@@ -29,6 +29,10 @@ if(WHISPER_XPU_USE_GPU AND SYCL_FOUND)
     message(STATUS "Intel oneAPI SYCL toolkit detected. GPU acceleration enabled.")
 
     # ── OneDNN detection (for SYCL backend acceleration) ──
+    # ONEDNN_STATIC controls linking mode:
+    #   ON  (default) — build oneDNN from source as static lib (no dnnl.dll needed)
+    #   OFF           — use pre-built oneDNN DLL from oneAPI installation
+    option(ONEDNN_STATIC "Link oneDNN as static library (build from source)" ON)
     include(cmake/FindDNNL.cmake)
 else()
     set(HAVE_SYCL FALSE)
