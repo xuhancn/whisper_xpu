@@ -63,8 +63,8 @@ if(ONEDNN_STATIC)
     endif()
     unset(_proc_cnt)
 
-    # ── Build command (matches PyTorch FindMKLDNN.cmake) ──
-    set(_dnnl_build_cmd "${CMAKE_COMMAND}" --build <BINARY_DIR> --parallel ${_jobs})
+    # ── Build command ──
+    set(_dnnl_build_cmd "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release --parallel ${_jobs})
     if(CMAKE_GENERATOR MATCHES "Make|Ninja")
         list(APPEND _dnnl_build_cmd "--" "-l" ${_jobs})
     endif()
@@ -128,7 +128,7 @@ if(ONEDNN_STATIC)
             # try_compile fails under VS generator + Intel toolset.
             -DSYCL_FLAG_SUPPORTED=TRUE
         BUILD_COMMAND ${_dnnl_build_cmd}
-        BUILD_BYPRODUCTS "<BINARY_DIR>/src/${DNNL_LIB_NAME}"
+        BUILD_BYPRODUCTS "<BINARY_DIR>/src/Release/${DNNL_LIB_NAME}"
         INSTALL_COMMAND ""
     )
 
@@ -139,14 +139,20 @@ if(ONEDNN_STATIC)
     # passes at configure time. The ExternalProject populates it during build.
     file(MAKE_DIRECTORY "${ONEDNN_BINARY_DIR}/include")
 
-    # ── Import the static library (matches PyTorch) ──
-    # PyTorch: ${BINARY_DIR}/src/dnnl.lib (no config subdir)
-    # Includes: ${SOURCE_DIR}/include ${BINARY_DIR}/include
+    # ── Import the static library ──
+    # PyTorch: ${BINARY_DIR}/src/dnnl.lib on Linux.
+    # With VS multi-config generator + --config Release output goes to
+    # src/Release/ on Windows.
+    if(WIN32)
+        set(_lib_dir "${ONEDNN_BINARY_DIR}/src/Release")
+    else()
+        set(_lib_dir "${ONEDNN_BINARY_DIR}/src")
+    endif()
     add_library(DNNL::dnnl STATIC IMPORTED GLOBAL)
     set_target_properties(DNNL::dnnl PROPERTIES
-        IMPORTED_LOCATION             "${ONEDNN_BINARY_DIR}/src/${DNNL_LIB_NAME}"
+        IMPORTED_LOCATION             "${_lib_dir}/${DNNL_LIB_NAME}"
         IMPORTED_CONFIGURATIONS       "RELEASE"
-        IMPORTED_LOCATION_RELEASE     "${ONEDNN_BINARY_DIR}/src/${DNNL_LIB_NAME}"
+        IMPORTED_LOCATION_RELEASE     "${_lib_dir}/${DNNL_LIB_NAME}"
         INTERFACE_INCLUDE_DIRECTORIES "${ONEDNN_SRC_DIR}/include;${ONEDNN_BINARY_DIR}/include"
         INTERFACE_LINK_LIBRARIES      "OpenCL.lib;sycl.lib"
     )
