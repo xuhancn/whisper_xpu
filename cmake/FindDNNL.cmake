@@ -105,6 +105,11 @@ if(ONEDNN_STATIC)
     # Set both generic IMPORTED_LOCATION and per-config locations
     # because ggml-sycl's cmake iterates IMPORTED_CONFIGURATIONS
     # and reads each per-config location.
+    #
+    # Pre-create the install include directory so CMake's import-target
+    # validation passes at configure time (the ExternalProject only
+    # populates it during build).
+    file(MAKE_DIRECTORY "${ONEDNN_INSTALL_DIR}/include/oneapi/dnnl")
     add_library(DNNL::dnnl STATIC IMPORTED GLOBAL)
     set_target_properties(DNNL::dnnl PROPERTIES
         IMPORTED_LOCATION             "${ONEDNN_INSTALL_DIR}/lib/dnnl.lib"
