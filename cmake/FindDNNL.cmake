@@ -70,26 +70,52 @@ if(ONEDNN_STATIC)
     endif()
 
     # ── Compiler selection ──
-    # PyTorch: -DCMAKE_CXX_COMPILER=icx (Windows) / icpx (Linux)
-    # DNNL_DPCPP_HOST_COMPILER=DEFAULT lets DPC++ find the host compiler.
     if(WIN32)
+        # With Visual Studio generator, CMAKE_CXX_COMPILER is ignored;
+        # the compiler is selected via platform toolset.  PyTorch's
+        # FindMKLDNN.cmake sets -DCMAKE_CXX_COMPILER=icx which works on
+        # Linux (Ninja/Make) but NOT on Windows (VS).  Dynamically detect
+        # the latest installed Intel C++ toolset from the VS installation.
         set(_dnnl_cxx_driver "icx")
         set(_dnnl_host_compiler "DEFAULT")
         set(DNNL_LIB_NAME "dnnl.lib")
+        set(_vs_toolset_dir
+            "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/MSBuild/Microsoft/VC/v170/Platforms/x64/PlatformToolsets")
+        set(_intel_toolset "")
+        file(GLOB _toolsets RELATIVE "${_vs_toolset_dir}" "${_vs_toolset_dir}/Intel*")
+        list(SORT _toolsets)
+        foreach(_ts IN LISTS _toolsets)
+            if(_ts MATCHES "Intel C\\+\\+ Compiler")
+                set(_intel_toolset "${_ts}")
+            endif()
+        endforeach()
+        if(_intel_toolset)
+            message(STATUS "oneDNN: using VS toolset '${_intel_toolset}'")
+        else()
+            message(FATAL_ERROR "oneDNN: Intel C++ toolset not found. "
+                "Run setvars.bat from oneAPI installation.")
+        endif()
+        set(_dnnl_toolset_arg
+            CMAKE_GENERATOR         "${CMAKE_GENERATOR}"
+            CMAKE_GENERATOR_PLATFORM "${CMAKE_GENERATOR_PLATFORM}"
+            CMAKE_GENERATOR_TOOLSET  "${_intel_toolset}"
+        )
     else()
         set(_dnnl_cxx_driver "icpx")
         set(_dnnl_host_compiler "g++")
         set(DNNL_LIB_NAME "libdnnl.a")
+        set(_dnnl_toolset_arg
+            CMAKE_CXX_COMPILER "icpx"
+            CMAKE_C_COMPILER   "icpx"
+        )
     endif()
 
-    # ── oneDNN build (copied from PyTorch FindMKLDNN.cmake) ──
+    # ── oneDNN build (PyTorch FindMKLDNN.cmake pattern) ──
     ExternalProject_Add(oneDNN_build
         SOURCE_DIR      "${ONEDNN_SRC_DIR}"
         PREFIX          "${ONEDNN_PREFIX}"
-        CMAKE_GENERATOR "${CMAKE_GENERATOR}"
-        CMAKE_GENERATOR_PLATFORM "${CMAKE_GENERATOR_PLATFORM}"
+        ${_dnnl_toolset_arg}
         CMAKE_ARGS
-            -DCMAKE_C_COMPILER=${_dnnl_cxx_driver}
             -DCMAKE_CXX_COMPILER=${_dnnl_cxx_driver}
             -DDNNL_GPU_RUNTIME=SYCL
             -DDNNL_CPU_RUNTIME=THREADPOOL
