@@ -124,6 +124,7 @@ if(ONEDNN_STATIC)
             -DONEDNN_BUILD_GRAPH=ON
             -DDNNL_LIBRARY_TYPE=STATIC
             -DDNNL_DPCPP_HOST_COMPILER=${_dnnl_host_compiler}
+            -DDNNL_ENABLE_ITT_TASKS=OFF
             # Skip the -fsycl flag check — icx-cl supports it but cmake's
             # try_compile fails under VS generator + Intel toolset.
             -DSYCL_FLAG_SUPPORTED=TRUE
