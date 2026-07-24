@@ -7,3 +7,6 @@
 [submodule "third_party/portaudio"]
 	path = third_party/portaudio
 	url = https://github.com/PortAudio/portaudio
+[submodule "third_party/oneDNN"]
+	path = third_party/oneDNN
+	url = https://github.com/uxlfoundation/oneDNN.git
