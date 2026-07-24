@@ -126,11 +126,12 @@ if(ONEDNN_STATIC)
     # ── Import the static library as DNNL::dnnl ──
     # Include paths: source headers + build-generated (dnnl_config.h).
     # Library: from build tree (INSTALL_COMMAND is empty).
+    # Note: VS multi-config generator puts output in Release/ subdir.
     add_library(DNNL::dnnl STATIC IMPORTED GLOBAL)
     set_target_properties(DNNL::dnnl PROPERTIES
-        IMPORTED_LOCATION             "${ONEDNN_BINARY_DIR}/src/${DNNL_LIB_NAME}"
+        IMPORTED_LOCATION             "${ONEDNN_BINARY_DIR}/src/Release/${DNNL_LIB_NAME}"
         IMPORTED_CONFIGURATIONS       "RELEASE"
-        IMPORTED_LOCATION_RELEASE     "${ONEDNN_BINARY_DIR}/src/${DNNL_LIB_NAME}"
+        IMPORTED_LOCATION_RELEASE     "${ONEDNN_BINARY_DIR}/src/Release/${DNNL_LIB_NAME}"
         INTERFACE_INCLUDE_DIRECTORIES "${ONEDNN_SRC_DIR}/include;${ONEDNN_BINARY_DIR}/include"
         INTERFACE_LINK_LIBRARIES      "OpenCL.lib;sycl.lib"
     )
