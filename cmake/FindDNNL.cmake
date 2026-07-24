@@ -65,21 +65,14 @@ if(ONEDNN_STATIC)
 
     # ── Build-system arguments ──
     if(WIN32)
-        get_property(_dnnl_host_cxx CACHE CMAKE_CXX_COMPILER PROPERTY VALUE)
-        if("${_dnnl_host_cxx}" STREQUAL "")
-            set(_dnnl_host_cxx "cl")
-        endif()
-        # Derive IntelSYCL_DIR from the already-detected SYCL compiler
-        # (FindSYCLToolkit.cmake sets SYCL_COMPILER to the full icx path).
-        if(DEFINED SYCL_COMPILER)
-            get_filename_component(_sycl_root "${SYCL_COMPILER}/../.." ABSOLUTE)
-            set(_intel_sycl_dir "${_sycl_root}/lib/cmake/IntelSYCL")
-        else()
-            set(_intel_sycl_dir "")
-        endif()
+        # When using Visual Studio generator, the compiler is selected via
+        # the platform toolset, not CMAKE_CXX_COMPILER.  The oneAPI setvars
+        # registers "Intel C++ Compiler 2025", so oneDNN's cmake finds the
+        # IntelSYCL package automatically via the inherited environment.
         set(_dnnl_cmake_gen
             CMAKE_GENERATOR          "${CMAKE_GENERATOR}"
             CMAKE_GENERATOR_PLATFORM "${CMAKE_GENERATOR_PLATFORM}"
+            CMAKE_GENERATOR_TOOLSET  "Intel C++ Compiler 2025"
         )
         set(_dnnl_cxx_flags "/MP")
         set(_dnnl_build_cmd "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release --parallel ${_jobs})
@@ -101,8 +94,6 @@ if(ONEDNN_STATIC)
         PREFIX            "${ONEDNN_PREFIX}"
         ${_dnnl_cmake_gen}
         CMAKE_ARGS
-            -DCMAKE_CXX_COMPILER=icx
-            -DCMAKE_C_COMPILER=icx
             -DNNL_LIBRARY_TYPE=STATIC
             -DNNL_GPU_RUNTIME=SYCL
             -DNNL_CPU_RUNTIME=NONE
@@ -111,9 +102,6 @@ if(ONEDNN_STATIC)
             -DNNL_ENABLE_CONCURRENT_EXEC=ON
             -DNNL_EXPERIMENTAL=ON
             -DONEDNN_BUILD_GRAPH=ON
-            -DNNL_DPCPP_HOST_COMPILER=${_dnnl_host_cxx}
-            -DIntelSYCL_DIR=${_intel_sycl_dir}
-            -DDNNL_WITH_SYCL=ON
             -DCMAKE_CXX_FLAGS=${_dnnl_cxx_flags}
         BUILD_COMMAND ${_dnnl_build_cmd}
         INSTALL_COMMAND ""
