@@ -110,7 +110,8 @@ if(ONEDNN_STATIC)
         IMPORTED_LOCATION             "${ONEDNN_INSTALL_DIR}/lib/dnnl.lib"
         IMPORTED_CONFIGURATIONS       "RELEASE"
         IMPORTED_LOCATION_RELEASE     "${ONEDNN_INSTALL_DIR}/lib/dnnl.lib"
-        INTERFACE_INCLUDE_DIRECTORIES "${ONEDNN_SRC_DIR}/include"
+        # Source headers (dnnl.hpp etc.) + install (generated dnnl_config.h)
+        INTERFACE_INCLUDE_DIRECTORIES "${ONEDNN_SRC_DIR}/include;${ONEDNN_INSTALL_DIR}/include"
         INTERFACE_LINK_LIBRARIES      "OpenCL.lib;sycl.lib"
     )
     add_dependencies(DNNL::dnnl oneDNN_build)
