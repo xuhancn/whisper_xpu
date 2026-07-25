@@ -1,6 +1,7 @@
 # Google Test
 set(GTEST_ROOT "${CMAKE_SOURCE_DIR}/third_party/gtest")
 if(NOT TARGET GTest::gtest)
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     add_subdirectory(${GTEST_ROOT} build-gtest EXCLUDE_FROM_ALL)
 endif()
 
