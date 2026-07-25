@@ -11,18 +11,26 @@
 // Returns the number of samples actually consumed.
 using AudioCaptureCallback = std::function<size_t(const float* samples, size_t count)>;
 
+struct AudioDeviceInfo {
+    int         index;       // PortAudio device index
+    std::string name;        // human-readable name
+    int         max_channels; // max input channels
+    double      sample_rate; // default sample rate
+    bool        is_default;  // true if this is the system default input
+    std::string to_string() const;
+};
+
 class AudioCapture {
 public:
     AudioCapture();
     ~AudioCapture();
 
-    // List available input devices (human-readable)
-    static std::vector<std::string> enumerate_devices();
+    // List available input devices (structured)
+    static std::vector<AudioDeviceInfo> enumerate_devices();
 
-    // Start capturing from the default input device.
-    // sample_rate: 16000 Hz recommended (what whisper.cpp expects)
-    // frames_per_buffer: ~512 (~32ms at 16kHz)
-    bool start(int sample_rate = 16000, int frames_per_buffer = 512);
+    // Start capturing from the specified input device.
+    // Pass -1 for system default (does not change system setting).
+    bool start(int device_id = -1, int sample_rate = 16000, int frames_per_buffer = 512);
 
     // Stop capturing
     void stop();
@@ -35,6 +43,9 @@ public:
 
     // Get the actual sample rate in use
     int sample_rate() const;
+
+    // Get the device index in use
+    int device_id() const;
 
 private:
     struct Impl;

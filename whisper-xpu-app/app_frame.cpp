@@ -28,6 +28,7 @@ AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size
     : wxFrame(nullptr, wxID_ANY, title, pos, size)
     , m_modelPath(model_path)
     , m_deviceIndex(device_index)
+    , m_micIndex(-1)
     , m_engine(nullptr)
     , m_audioCapture(nullptr)
 {
@@ -36,8 +37,9 @@ AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size
     CreateControls();
     PopulateModelList();
     PopulateDeviceList();
+    PopulateMicList();
 
-    // Log available devices
+    // Log available XPU devices
     {
         auto devices = whisper_xpu::get_available_devices();
         std::ostringstream oss;
@@ -85,13 +87,21 @@ void AppFrame::CreateControls() {
     modelSizer->Add(m_recordBtn, 0, wxALL, 5);
     topSizer->Add(modelSizer, 0, wxEXPAND);
 
-    // Device row
+    // XPU Device row
     auto* deviceSizer = new wxBoxSizer(wxHORIZONTAL);
     deviceSizer->Add(new wxStaticText(mainPanel, wxID_ANY, "Device:"),
                      0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
     m_deviceChoice = new wxChoice(mainPanel, ID_DEVICE_CHOICE);
     deviceSizer->Add(m_deviceChoice, 1, wxEXPAND | wxALL, 5);
     topSizer->Add(deviceSizer, 0, wxEXPAND);
+
+    // Mic row
+    auto* micSizer = new wxBoxSizer(wxHORIZONTAL);
+    micSizer->Add(new wxStaticText(mainPanel, wxID_ANY, "Mic:"),
+                   0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
+    m_micChoice = new wxChoice(mainPanel, ID_MIC_CHOICE);
+    micSizer->Add(m_micChoice, 1, wxEXPAND | wxALL, 5);
+    topSizer->Add(micSizer, 0, wxEXPAND);
 
     // Transcription output
     m_outputText = new wxTextCtrl(mainPanel, wxID_ANY, "",
@@ -116,6 +126,7 @@ void AppFrame::CreateControls() {
     m_browseBtn->Bind(wxEVT_BUTTON, &AppFrame::OnBrowseModel, this);
     m_recordBtn->Bind(wxEVT_TOGGLEBUTTON, &AppFrame::OnToggleRecord, this);
     m_deviceChoice->Bind(wxEVT_CHOICE, &AppFrame::OnSelectDevice, this);
+    m_micChoice->Bind(wxEVT_CHOICE, &AppFrame::OnSelectMic, this);
     Bind(wxEVT_COMMAND_TEXT_UPDATED, [this](wxCommandEvent& ev) {
         if (ev.GetId() == ID_TRANSCRIBE_RESULT) {
             m_outputText->AppendText(ev.GetString());
@@ -164,6 +175,20 @@ void AppFrame::PopulateDeviceList() {
         m_deviceChoice->SetSelection(sel);
 }
 
+void AppFrame::PopulateMicList() {
+    auto mics = AudioCapture::enumerate_devices();
+    m_micChoice->Clear();
+    // First entry: system default
+    m_micChoice->Append("System Default");
+    int sel = 0;
+    for (size_t i = 0; i < mics.size(); ++i) {
+        m_micChoice->Append(wxString(mics[i].to_string()));
+        if (mics[i].index == m_micIndex)
+            sel = static_cast<int>(i + 1);
+    }
+    m_micChoice->SetSelection(sel);
+}
+
 // ---------------------------------------------------------------------------
 // Event handlers
 // ---------------------------------------------------------------------------
@@ -194,6 +219,26 @@ void AppFrame::OnSelectDevice(wxCommandEvent& WXUNUSED(event)) {
         LogMessage("Device changed to: " + wxString(devices[sel].to_string()));
         if (m_engine && !m_modelPath.empty()) {
             LoadEngine(m_modelPath);
+        }
+    }
+}
+
+void AppFrame::OnSelectMic(wxCommandEvent& WXUNUSED(event)) {
+    int sel = m_micChoice->GetSelection();
+    // sel 0 = system default (-1), sel >= 1 = device index from enumerate_devices
+    int new_mic = (sel <= 0) ? -1 : (sel - 1);
+    if (new_mic != m_micIndex) {
+        m_micIndex = new_mic;
+        auto mics = AudioCapture::enumerate_devices();
+        if (new_mic >= 0 && static_cast<size_t>(new_mic) < mics.size()) {
+            LogMessage("Mic changed to: " + wxString(mics[new_mic].to_string()));
+        } else {
+            LogMessage("Mic changed to: System Default");
+        }
+        // If recording is active, restart with new mic
+        if (m_recording) {
+            SetRecording(false);
+            SetRecording(true);
         }
     }
 }
@@ -248,7 +293,8 @@ void AppFrame::SetRecording(bool active) {
         m_recordBtn->SetValue(true);
         m_statusBar->SetStatusText("🔴 Recording...");
         m_outputText->Clear();
-        LogMessage("Recording started...");
+        LogMessage("Recording started (mic: " +
+                   wxString(m_micIndex < 0 ? "default" : "") + ")...");
 
         auto sampleBuf = std::make_shared<std::vector<float>>();
         auto bufMutex  = std::make_shared<std::mutex>();
@@ -262,7 +308,8 @@ void AppFrame::SetRecording(bool active) {
             }
         );
 
-        if (!m_audioCapture->start()) {
+        // Start with user-selected mic (m_micIndex) or system default (-1)
+        if (!m_audioCapture->start(m_micIndex)) {
             LogMessage("Error: Failed to start microphone capture.");
             m_recording = false;
             m_recordBtn->SetLabel("🎤  Start Recording");

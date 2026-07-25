@@ -28,17 +28,20 @@ private:
     void OnSelectModel(wxCommandEvent& event);
     void OnBrowseModel(wxCommandEvent& event);
     void OnSelectDevice(wxCommandEvent& event);
+    void OnSelectMic(wxCommandEvent& event);
     void OnClose(wxCloseEvent& event);
 
     void CreateControls();
     void PopulateModelList();
     void PopulateDeviceList();
+    void PopulateMicList();
     void LogMessage(const wxString& text);
     void SetRecording(bool active);
     bool LoadEngine(const std::string& model_path);
 
     wxChoice*       m_modelChoice;
     wxChoice*       m_deviceChoice;
+    wxChoice*       m_micChoice;
     wxToggleButton* m_recordBtn;
     wxButton*       m_browseBtn;
     wxTextCtrl*     m_outputText;
@@ -50,6 +53,7 @@ private:
     std::unique_ptr<AudioCapture> m_audioCapture;
     std::string m_modelPath;
     int m_deviceIndex;
+    int m_micIndex = -1;   // -1 = system default
     std::atomic<bool> m_recording{false};
     std::thread m_audioThread;
 
@@ -57,6 +61,7 @@ private:
         ID_TRANSCRIBE_RESULT = wxID_HIGHEST + 1,
         ID_TRANSCRIBE_ERROR,
         ID_DEVICE_CHOICE,
+        ID_MIC_CHOICE,
     };
 
     wxDECLARE_EVENT_TABLE();
