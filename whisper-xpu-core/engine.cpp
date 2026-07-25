@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "device_detect.h"
 
 #include "whisper.h"
 #include "ggml-sycl.h"
@@ -57,7 +58,6 @@ static bool load_wav(const std::string& path, std::vector<float>& out, int expec
     int bits_per_sample = 0;
     std::vector<int16_t> pcm16;
 
-    // Read chunks until 'data' is found
     while (file.good()) {
         char chunk_id[4];
         file.read(chunk_id, 4);
@@ -70,7 +70,7 @@ static bool load_wav(const std::string& path, std::vector<float>& out, int expec
             read32(); // byte rate
             read16(); // block align
             bits_per_sample = read16();
-            if (audio_format != 1) { // 1 = PCM
+            if (audio_format != 1) {
                 fprintf(stderr, "[whisper-xpu] Unsupported WAV format (%d), need PCM\n", audio_format);
                 return false;
             }
@@ -101,7 +101,6 @@ static bool load_wav(const std::string& path, std::vector<float>& out, int expec
                 return false;
             }
         } else {
-            // Skip unknown chunks
             file.seekg(chunk_size, std::ios::cur);
         }
     }
@@ -112,7 +111,6 @@ static bool load_wav(const std::string& path, std::vector<float>& out, int expec
     }
 
     // Convert to mono float32 at expected_sr
-    // Step 1: mix down to mono
     std::vector<float> mono_float;
     if (channels == 1) {
         mono_float.resize(pcm16.size());
@@ -131,7 +129,6 @@ static bool load_wav(const std::string& path, std::vector<float>& out, int expec
         }
     }
 
-    // Step 2: resample if needed (simple linear interpolation)
     if (sample_rate != expected_sr) {
         double ratio = static_cast<double>(expected_sr) / sample_rate;
         size_t new_len = static_cast<size_t>(mono_float.size() * ratio);
@@ -162,7 +159,8 @@ struct Engine::Impl {
     struct whisper_context* ctx = nullptr;
     bool gpu_initialized = false;
     std::string device_desc;
-    int  n_threads = 0;
+    int device_id = kDeviceCPU;
+    int n_threads = 0;
 
     Impl() {
         n_threads = static_cast<int>(std::thread::hardware_concurrency());
@@ -176,31 +174,36 @@ struct Engine::Impl {
         }
     }
 
-    // Probe for SYCL device via ggml-sycl backend API
-    bool probe_sycl_device() {
+    bool probe_sycl_device(int dev_id) {
 #ifdef WHISPER_XPU_HAS_SYCL
         int device_count = ggml_backend_sycl_get_device_count();
         if (device_count < 1) {
             fprintf(stderr, "[whisper-xpu] No SYCL devices found (%d)\n", device_count);
             return false;
         }
+        if (dev_id >= device_count) {
+            fprintf(stderr, "[whisper-xpu] Device %d out of range (0-%d)\n", dev_id, device_count - 1);
+            return false;
+        }
 
         char desc[256] = {0};
-        ggml_backend_sycl_get_device_description(0, desc, sizeof(desc));
+        ggml_backend_sycl_get_device_description(dev_id, desc, sizeof(desc));
 
         size_t free_mem = 0, total_mem = 0;
-        ggml_backend_sycl_get_device_memory(0, &free_mem, &total_mem);
+        ggml_backend_sycl_get_device_memory(dev_id, &free_mem, &total_mem);
 
         std::ostringstream oss;
         oss << desc;
         if (total_mem > 0) {
             oss << " | VRAM: " << (total_mem / (1024 * 1024)) << " MB";
+            if (free_mem > 0)
+                oss << " (free: " << (free_mem / (1024 * 1024)) << " MB)";
         }
         device_desc = oss.str();
-        fprintf(stderr, "[whisper-xpu] SYCL device: %s\n", device_desc.c_str());
+        fprintf(stderr, "[whisper-xpu] SYCL device %d: %s\n", dev_id, device_desc.c_str());
         return true;
 #else
-        (void)0;
+        (void)dev_id;
         return false;
 #endif
     }
@@ -210,12 +213,14 @@ struct Engine::Impl {
 // Constructor
 // ---------------------------------------------------------------------------
 
-Engine::Engine(const std::string& model_path, bool use_gpu)
+Engine::Engine(const std::string& model_path, int device_id)
     : pimpl_(std::make_unique<Impl>())
 {
-    if (use_gpu) {
+    pimpl_->device_id = device_id;
+
+    if (device_id >= 0) {
 #ifdef WHISPER_XPU_HAS_SYCL
-        pimpl_->gpu_initialized = pimpl_->probe_sycl_device();
+        pimpl_->gpu_initialized = pimpl_->probe_sycl_device(device_id);
         if (!pimpl_->gpu_initialized) {
             fprintf(stderr, "[whisper-xpu] GPU init failed, falling back to CPU\n");
         }
@@ -226,6 +231,7 @@ Engine::Engine(const std::string& model_path, bool use_gpu)
 
     whisper_context_params cparams = whisper_context_default_params();
     cparams.use_gpu = pimpl_->gpu_initialized;
+    cparams.gpu_device = device_id;
 
     pimpl_->ctx = whisper_init_from_file_with_params(model_path.c_str(), cparams);
     if (!pimpl_->ctx) {
@@ -251,7 +257,6 @@ TranscriptionResult Engine::transcribe_file(const std::string& audio_path) {
         throw std::runtime_error("Engine not initialized");
     }
 
-    // Load WAV file
     std::vector<float> pcm;
     if (!load_wav(audio_path, pcm, 16000)) {
         return TranscriptionResult{"", 0, 0, pimpl_->gpu_initialized};
@@ -383,6 +388,10 @@ bool Engine::is_gpu_enabled() const {
 
 std::string Engine::device_description() const {
     return pimpl_->device_desc;
+}
+
+int Engine::device_id() const {
+    return pimpl_->device_id;
 }
 
 } // namespace whisper_xpu

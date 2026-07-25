@@ -13,30 +13,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 
 # Multi-process compilation for MSVC targets only.
-# /MP compiles multiple source files in parallel within a single project.
-# Intel C++ targets (SYCL) are excluded — icx-cl rejects /MP with -fsycl.
 add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/MP>)
 
 # ── SYCL toolchain detection ──
-# FindSYCLToolkit locates the Intel oneAPI installation (compiler, headers, libs).
 include(cmake/FindSYCLToolkit.cmake)
 
 # Option to enable GPU acceleration. Default to ON when SYCL toolkit is found.
 option(WHISPER_XPU_USE_GPU "Enable GPU acceleration via SYCL" ${SYCL_FOUND})
 
-# When the SYCL toolkit is available and GPU is requested, set HAVE_SYCL.
-# On Windows with Visual Studio, this means compiling SYCL-specific files
-# with the Intel C++ Compiler toolset, while other files use MSVC.
-# whisper.cpp/ggml's SYCL backend handles this automatically.
 if(WHISPER_XPU_USE_GPU AND SYCL_FOUND)
     set(HAVE_SYCL TRUE)
     add_compile_definitions(WHISPER_XPU_HAS_SYCL=1)
     message(STATUS "Intel oneAPI SYCL toolkit detected. GPU acceleration enabled.")
 
-    # ── OneDNN detection (for SYCL backend acceleration) ──
-    # ONEDNN_STATIC controls linking mode:
-    #   ON  (default) — build oneDNN from source as static lib (no dnnl.dll needed)
-    #   OFF           — use pre-built oneDNN DLL from oneAPI installation
+    # ── OneDNN detection ──
     option(ONEDNN_STATIC "Link oneDNN as static library (build from source)" ON)
     include(cmake/FindDNNL.cmake)
 else()
@@ -51,13 +41,10 @@ else()
 endif()
 
 # ── whisper.cpp ──
-# Add our cmake/ dir to CMAKE_MODULE_PATH so FindDNNL.cmake resolves
-# when ggml's SYCL backend calls find_package(DNNL).
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 if(HAVE_SYCL)
     set(GGML_SYCL ON CACHE BOOL "Enable SYCL in whisper.cpp")
-    # oneDNN integration in ggml's SYCL backend.
     set(GGML_SYCL_DNN ON CACHE BOOL "Enable oneDNN in whisper.cpp SYCL backend")
 endif()
 set(GGML_CUDA OFF CACHE BOOL "" FORCE)
@@ -86,3 +73,6 @@ add_subdirectory(third_party/portaudio)
 # ── Own targets ──
 add_subdirectory(whisper-xpu-core)
 add_subdirectory(whisper-xpu-app)
+
+# ── Tests ──
+add_subdirectory(tests)
