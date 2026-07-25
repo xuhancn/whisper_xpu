@@ -3,23 +3,36 @@ add_library(whisper_xpu_core STATIC
 )
 
 if(HAVE_SYCL)
-    # device_detect.cpp uses SYCL APIs directly and needs the Intel
-    # C++ Compiler.  VS_TOOLSET_OVERRIDE (CMake 3.22+) lets us use
-    # a different toolset for a single source file within an MSVC target.
-    target_sources(whisper_xpu_core PRIVATE device_detect.cpp)
+    # ── SYCL source files ──
+    # All files in sycl_src/ are compiled with Intel C++ Compiler and -fsycl.
+    file(GLOB SYCL_SOURCES sycl_src/*.cpp)
+    target_sources(whisper_xpu_core PRIVATE ${SYCL_SOURCES})
     target_include_directories(whisper_xpu_core PRIVATE ${SYCL_INCLUDE_DIR})
     target_compile_definitions(whisper_xpu_core PRIVATE WHISPER_XPU_HAS_SYCL)
+
     if(WIN32 AND CMAKE_GENERATOR MATCHES "Visual Studio")
         if(DEFINED ENV{DNNL_INTEL_TOOLSET})
-            set_source_files_properties(device_detect.cpp PROPERTIES
-                VS_TOOLSET_OVERRIDE "$ENV{DNNL_INTEL_TOOLSET}")
+            set(_sycl_toolset "$ENV{DNNL_INTEL_TOOLSET}")
         else()
-            set_source_files_properties(device_detect.cpp PROPERTIES
-                VS_TOOLSET_OVERRIDE "Intel C++ Compiler 2025")
+            set(_sycl_toolset "Intel C++ Compiler 2025")
         endif()
-        set_source_files_properties(device_detect.cpp PROPERTIES
-            COMPILE_FLAGS "-fsycl")
+        foreach(_src ${SYCL_SOURCES})
+            set_source_files_properties(${_src} PROPERTIES
+                VS_TOOLSET_OVERRIDE "${_sycl_toolset}"
+                COMPILE_FLAGS "-fsycl")
+        endforeach()
+    else()
+        foreach(_src ${SYCL_SOURCES})
+            set_source_files_properties(${_src} PROPERTIES
+                COMPILE_FLAGS "-fsycl")
+        endforeach()
     endif()
+
+    # sycl.lib for SYCL runtime symbols
+    if(SYCL_LIBRARY_DIR)
+        target_link_directories(whisper_xpu_core PRIVATE ${SYCL_LIBRARY_DIR})
+    endif()
+    target_link_libraries(whisper_xpu_core PRIVATE sycl)
 endif()
 
 target_include_directories(whisper_xpu_core PUBLIC
@@ -33,12 +46,8 @@ target_include_directories(whisper_xpu_core PRIVATE
 )
 
 target_link_libraries(whisper_xpu_core PUBLIC
-    whisper    # from whisper.cpp's CMake
+    whisper
 )
-
-if(HAVE_SYCL)
-    target_compile_definitions(whisper_xpu_core PRIVATE WHISPER_XPU_HAS_SYCL)
-endif()
 
 if(WIN32)
     target_link_libraries(whisper_xpu_core PRIVATE winmm)
