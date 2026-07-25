@@ -4,20 +4,13 @@
 #
 #   ONEDNN_STATIC=ON  (default)
 #     - Builds oneDNN from source (third_party/oneDNN) as a static library.
-#     - Uses Intel C++ Compiler (icx/icpx) so SYCL GPU runtime works.
+#     - Requires DNNL_INTEL_TOOLSET env var on Windows (e.g. "Intel C++ Compiler 2025").
 #     - Produces DNNL::dnnl as a STATIC IMPORTED target.
-#     - Does NOT depend on the oneAPI pre-built package (no dnnl.dll needed).
 #
 #   ONEDNN_STATIC=OFF
-#     - Uses pre-built oneDNN from the oneAPI installation (dnnl.dll).
-#     - Auto-detects DNNLROOT by scanning oneAPI install paths or $ENV{DNNLROOT}.
+#     - Uses pre-built oneDNN DLL from DNNLROOT env var.
 #     - Delegates to oneAPI-provided dnnl-config.cmake (defines DNNL::dnnl SHARED).
-#
-# Variables defined:
-#   DNNL_FOUND          - True if oneDNN is available
-#   DNNLROOT            - Root directory of the oneDNN installation
 
-# ── Guard against double processing ──
 if(TARGET DNNL::dnnl)
     return()
 endif()
@@ -25,9 +18,9 @@ endif()
 option(ONEDNN_STATIC "Link oneDNN as static library (build from source)" ON)
 
 if(ONEDNN_STATIC)
-    # ═══════════════════════════════════════════════════════════════
-    #  MODE 1: Static linking — build oneDNN from source
-    # ═══════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
+    #  MODE 1: Static — build oneDNN from source
+    # ═══════════════════════════════════════════════════════════
     include(ExternalProject)
 
     set(ONEDNN_SRC_DIR "${CMAKE_SOURCE_DIR}/third_party/oneDNN")
@@ -53,43 +46,20 @@ if(ONEDNN_STATIC)
 
     # ── Build command ──
     set(_dnnl_build_cmd "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release --parallel ${_jobs})
-    if(CMAKE_GENERATOR MATCHES "Make|Ninja")
-        list(APPEND _dnnl_build_cmd "--" "-l" ${_jobs})
-    endif()
 
-    # ── Compiler selection ──
+    # ── Compiler selection (all from environment) ──
     if(WIN32)
-        # With Visual Studio generator, CMAKE_CXX_COMPILER is ignored;
-        # the compiler is selected via platform toolset.  Dynamically
-        # detect the latest installed Intel C++ toolset from the VS
-        # installation without hardcoding versions or paths.
-        set(_dnnl_cxx_driver "icx")
-        set(_dnnl_host_compiler "DEFAULT")
+        # VS generator ignores CMAKE_CXX_COMPILER; toolset must be set.
+        # The oneAPI setvars.bat registers an Intel toolset like
+        # "Intel C++ Compiler 2025".  Pass it via DNNL_INTEL_TOOLSET.
         set(DNNL_LIB_NAME "dnnl.lib")
-        set(_intel_toolset "")
-        if(CMAKE_GENERATOR_INSTANCE)
-            file(GLOB _vs_platform_dirs
-                "${CMAKE_GENERATOR_INSTANCE}/MSBuild/Microsoft/VC/*/Platforms/x64/PlatformToolsets")
-            list(SORT _vs_platform_dirs)
-            foreach(_pd IN LISTS _vs_platform_dirs)
-                file(GLOB _toolsets RELATIVE "${_pd}" "${_pd}/Intel*")
-                list(SORT _toolsets)
-                foreach(_ts IN LISTS _toolsets)
-                    if(_ts MATCHES "Intel C\\+\\+ Compiler")
-                        set(_intel_toolset "${_ts}")
-                        break()
-                    endif()
-                endforeach()
-                if(_intel_toolset)
-                    break()
-                endif()
-            endforeach()
-        endif()
-        if(_intel_toolset)
+        if(DEFINED ENV{DNNL_INTEL_TOOLSET})
+            set(_intel_toolset "$ENV{DNNL_INTEL_TOOLSET}")
             message(STATUS "oneDNN: using VS toolset '${_intel_toolset}'")
         else()
-            message(FATAL_ERROR "oneDNN: Intel C++ toolset not found. "
-                "Run setvars.bat from oneAPI installation.")
+            message(FATAL_ERROR "oneDNN: set DNNL_INTEL_TOOLSET in your environment. "
+                "Run setvars.bat from oneAPI, then:\n"
+                "  set DNNL_INTEL_TOOLSET=Intel C++ Compiler 2025")
         endif()
         set(_dnnl_toolset_arg
             CMAKE_GENERATOR         "${CMAKE_GENERATOR}"
@@ -97,8 +67,6 @@ if(ONEDNN_STATIC)
             CMAKE_GENERATOR_TOOLSET  "${_intel_toolset}"
         )
     else()
-        set(_dnnl_cxx_driver "icpx")
-        set(_dnnl_host_compiler "g++")
         set(DNNL_LIB_NAME "libdnnl.a")
         set(_dnnl_toolset_arg
             CMAKE_CXX_COMPILER "icpx"
@@ -106,24 +74,22 @@ if(ONEDNN_STATIC)
         )
     endif()
 
-    # ── oneDNN build (PyTorch FindMKLDNN.cmake pattern) ──
+    # ── oneDNN build ──
     ExternalProject_Add(oneDNN_build
         SOURCE_DIR      "${ONEDNN_SRC_DIR}"
         PREFIX          "${ONEDNN_PREFIX}"
         ${_dnnl_toolset_arg}
         CMAKE_ARGS
-            -DCMAKE_CXX_COMPILER=${_dnnl_cxx_driver}
+            -DCMAKE_CXX_COMPILER=icx
             -DDNNL_GPU_RUNTIME=SYCL
             -DDNNL_CPU_RUNTIME=THREADPOOL
             -DDNNL_BUILD_TESTS=OFF
             -DDNNL_BUILD_EXAMPLES=OFF
             -DONEDNN_BUILD_GRAPH=ON
             -DDNNL_LIBRARY_TYPE=STATIC
-            -DDNNL_DPCPP_HOST_COMPILER=${_dnnl_host_compiler}
+            -DDNNL_DPCPP_HOST_COMPILER=DEFAULT
             -DDNNL_ENABLE_ITT_TASKS=OFF
             -DDNNL_ENABLE_JIT_PROFILING=OFF
-            # Skip the -fsycl flag check — icx-cl supports it but cmake's
-            # try_compile fails under VS generator + Intel toolset.
             -DSYCL_FLAG_SUPPORTED=TRUE
         BUILD_COMMAND ${_dnnl_build_cmd}
         BUILD_BYPRODUCTS "<BINARY_DIR>/src/Release/${DNNL_LIB_NAME}"
@@ -132,14 +98,9 @@ if(ONEDNN_STATIC)
 
     ExternalProject_Get_Property(oneDNN_build SOURCE_DIR BINARY_DIR)
     set(ONEDNN_BINARY_DIR "${BINARY_DIR}")
-
-    # Pre-create the binary include dir so CMake's import-target validation
-    # passes at configure time. The ExternalProject populates it during build.
     file(MAKE_DIRECTORY "${ONEDNN_BINARY_DIR}/include")
 
     # ── Import the static library ──
-    # With VS multi-config generator + --config Release output goes to
-    # src/Release/. On Linux generators output goes directly to src/.
     if(WIN32)
         set(_lib_dir "${ONEDNN_BINARY_DIR}/src/Release")
     else()
@@ -159,73 +120,50 @@ if(ONEDNN_STATIC)
     message(STATUS "Found oneDNN: library at ${_lib_dir}/${DNNL_LIB_NAME}")
 
 else()
-    # ═══════════════════════════════════════════════════════════════
-    #  MODE 2: Dynamic linking — use oneAPI pre-built DLL
-    # ═══════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
+    #  MODE 2: Dynamic — pre-built oneAPI DLL
+    # ═══════════════════════════════════════════════════════════
 
-    # -- Determine DNNLROOT --
     set(DNNLROOT "")
     if(DEFINED ENV{DNNLROOT})
         set(DNNLROOT $ENV{DNNLROOT})
         message(STATUS "DNNLROOT from environment: ${DNNLROOT}")
-    elseif(DEFINED ENV{ONEAPI_ROOT})
-        set(_oneapi_root "$ENV{ONEAPI_ROOT}")
-        foreach(_version "latest" "2025.3" "2025.2" "2025.1")
-            set(_candidate "${_oneapi_root}/dnnl/${_version}")
-            if(EXISTS "${_candidate}/lib/cmake/dnnl/dnnl-config.cmake")
-                set(DNNLROOT "${_candidate}")
-                message(STATUS "Found oneDNN at: ${DNNLROOT}")
-                break()
-            endif()
-        endforeach()
-        if(NOT DNNLROOT)
-            message(FATAL_ERROR "oneDNN not found under ONEAPI_ROOT=${_oneapi_root}/dnnl/. "
-                "Set DNNLROOT to the oneDNN installation directory.")
-        endif()
     else()
-        message(FATAL_ERROR "oneDNN not found. Set DNNLROOT or ONEAPI_ROOT env var. "
-            "Run \"call setvars.bat\" from oneAPI installation.")
-    endif()
+        message(FATAL_ERROR "oneDNN (dynamic mode) requires DNNLROOT env var. "
+            "Run setvars.bat from oneAPI installation.")
     endif()
 
-    string(COMPARE EQUAL "${DNNLROOT}" "" nodnnl)
-    if(nodnnl)
-        set(DNNL_FOUND FALSE)
-        message(STATUS "oneDNN not found. SYCL backend will build without oneDNN acceleration.")
-    else()
-        if(CMAKE_SYSTEM_NAME MATCHES "Windows")
-            if(DEFINED ENV{CMPLR_ROOT})
-                set(_ocl_root "$ENV{CMPLR_ROOT}")
-                if(EXISTS "${_ocl_root}/include/CL/opencl.h")
-                list(APPEND CMAKE_INCLUDE_PATH "${_ocl_root}/include")
-                list(APPEND CMAKE_LIBRARY_PATH "${_ocl_root}/lib")
-                message(STATUS "OpenCL path from oneAPI: ${_ocl_root}")
-            endif()
+    if(CMAKE_SYSTEM_NAME MATCHES "Windows" AND DEFINED ENV{CMPLR_ROOT})
+        set(_ocl_root "$ENV{CMPLR_ROOT}")
+        if(EXISTS "${_ocl_root}/include/CL/opencl.h")
+            list(APPEND CMAKE_INCLUDE_PATH "${_ocl_root}/include")
+            list(APPEND CMAKE_LIBRARY_PATH "${_ocl_root}/lib")
+            message(STATUS "OpenCL path from CMPLR_ROOT: ${_ocl_root}")
         endif()
+    endif()
 
-        set(DNNL_DIR "${DNNLROOT}/lib/cmake/dnnl")
-        if(EXISTS "${DNNL_DIR}/dnnl-config.cmake")
-            include("${DNNL_DIR}/dnnl-config.cmake")
-            if(TARGET DNNL::dnnl)
-                set(DNNL_FOUND TRUE)
-                get_target_property(_configs DNNL::dnnl IMPORTED_CONFIGURATIONS)
-                if(_configs)
-                    foreach(_cfg ${_configs})
-                        get_target_property(_lib DNNL::dnnl IMPORTED_LOCATION_${_cfg})
-                        if(_lib)
-                            message(STATUS "Found oneDNN: ${_lib}")
-                            break()
-                        endif()
-                    endforeach()
-                endif()
-            else()
-                set(DNNL_FOUND FALSE)
-                message(STATUS "oneDNN config found but DNNL::dnnl target not defined")
+    set(DNNL_DIR "${DNNLROOT}/lib/cmake/dnnl")
+    if(EXISTS "${DNNL_DIR}/dnnl-config.cmake")
+        include("${DNNL_DIR}/dnnl-config.cmake")
+        if(TARGET DNNL::dnnl)
+            set(DNNL_FOUND TRUE)
+            get_target_property(_configs DNNL::dnnl IMPORTED_CONFIGURATIONS)
+            if(_configs)
+                foreach(_cfg ${_configs})
+                    get_target_property(_lib DNNL::dnnl IMPORTED_LOCATION_${_cfg})
+                    if(_lib)
+                        message(STATUS "Found oneDNN: ${_lib}")
+                        break()
+                    endif()
+                endforeach()
             endif()
         else()
             set(DNNL_FOUND FALSE)
-            message(STATUS "dnnl-config.cmake not found in ${DNNL_DIR}")
+            message(STATUS "oneDNN config found but DNNL::dnnl target not defined")
         endif()
+    else()
+        set(DNNL_FOUND FALSE)
+        message(STATUS "dnnl-config.cmake not found in ${DNNL_DIR}")
     endif()
 endif()
 
