@@ -1,3 +1,4 @@
+#include "export.h"
 #pragma once
 
 #include <string>
@@ -9,7 +10,7 @@ static constexpr int kDeviceAuto = -2;   // auto-detect best device
 
 enum class DeviceClass { CPU, GPU_Integrated, GPU_Discrete, Unknown };
 
-struct DeviceInfo {
+struct WHISPER_XPU_API DeviceInfo {
     int         index;          // device index for ggml_backend_sycl_init (kDeviceCPU = CPU)
     DeviceClass device_class;   // CPU / iGPU / dGPU
     std::string name;           // human-readable device name

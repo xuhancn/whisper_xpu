@@ -1,5 +1,7 @@
 #pragma once
 
+#include "export.h"
+
 #include <string>
 #include <memory>
 #include <vector>
@@ -7,33 +9,33 @@
 
 namespace whisper_xpu {
 
-struct TranscriptionResult {
+struct WHISPER_XPU_API TranscriptionResult {
     std::string text;
     double processing_time_ms;
     int segment_count;
     bool gpu_accelerated;
 };
 
-struct BenchmarkResult {
+struct WHISPER_XPU_API BenchmarkResult {
     double total_audio_duration_s;
     double processing_time_ms;
     double realtime_factor;
     double rtf;
 };
 
-struct VadConfig {
+struct WHISPER_XPU_API VadConfig {
     bool   enabled               = false;
     float  max_speech_duration_s = 5.0f;
     int    speech_pad_ms         = 500;
     float  vad_threshold         = 0.5f;
     int    min_speech_duration_ms = 250;
     int    min_silence_duration_ms = 100;
-    const char* vad_model_path   = nullptr;  // path to ggml-vad.bin
+    const char* vad_model_path   = nullptr;
 };
 
 using AudioSampleCallback = std::function<size_t(float* buffer, size_t max_samples)>;
 
-class Engine {
+class WHISPER_XPU_API Engine {
 public:
     Engine(const std::string& model_path, int device_id = 0);
     ~Engine();

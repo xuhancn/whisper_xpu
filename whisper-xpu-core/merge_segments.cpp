@@ -2,7 +2,7 @@
 
 namespace whisper_xpu {
 
-std::string merge_segments(const std::vector<const char*>& segments) {
+WHISPER_XPU_API std::string merge_segments(const std::vector<const char*>& segments) {
     std::string result;
     for (size_t i = 0; i < segments.size(); i++) {
         if (!segments[i]) continue;
@@ -29,7 +29,7 @@ std::string merge_segments(const std::vector<const char*>& segments) {
     return result;
 }
 
-std::string merge_segments(const std::vector<std::string>& segments) {
+WHISPER_XPU_API std::string merge_segments(const std::vector<std::string>& segments) {
     std::vector<const char*> ptrs;
     ptrs.reserve(segments.size());
     for (const auto& s : segments) ptrs.push_back(s.c_str());
