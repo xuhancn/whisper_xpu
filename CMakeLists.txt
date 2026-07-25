@@ -12,34 +12,29 @@ set(CMAKE_C_STANDARD 11)
 
 add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/MP>)
 
+# ── SYCL is mandatory ──
 include(cmake/FindSYCLToolkit.cmake)
-
-option(WHISPER_XPU_USE_GPU "Enable GPU acceleration via SYCL" ${SYCL_FOUND})
-
-if(WHISPER_XPU_USE_GPU AND SYCL_FOUND)
-    set(HAVE_SYCL TRUE)
-    add_compile_definitions(WHISPER_XPU_HAS_SYCL=1)
-    message(STATUS "Intel oneAPI SYCL toolkit detected. GPU acceleration enabled.")
-
-    option(ONEDNN_STATIC "Link oneDNN as static library (build from source)" ON)
-    include(cmake/FindDNNL.cmake)
-else()
-    set(HAVE_SYCL FALSE)
-    set(DNNL_FOUND FALSE)
-    if(NOT SYCL_FOUND)
-        message(STATUS "Intel oneAPI SYCL toolkit not found. Building CPU-only. "
-                       "Install oneAPI Base Toolkit for GPU support.")
-    else()
-        message(STATUS "GPU acceleration disabled by WHISPER_XPU_USE_GPU=OFF")
-    endif()
+if(NOT SYCL_FOUND)
+    message(FATAL_ERROR
+        "Intel oneAPI SYCL toolkit not found.\n"
+        "This project requires SYCL for XPU/GPU acceleration.\n"
+        "Install the Intel oneAPI Base Toolkit:\n"
+        "  https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html\n"
+        "After installation, run setvars.bat (Windows) or source setvars.sh (Linux).")
 endif()
 
+set(HAVE_SYCL TRUE)
+add_compile_definitions(WHISPER_XPU_HAS_SYCL=1)
+message(STATUS "Intel oneAPI SYCL toolkit detected. GPU acceleration enabled.")
+
+# ── oneDNN detection ──
+option(ONEDNN_STATIC "Link oneDNN as static library (build from source)" ON)
+include(cmake/FindDNNL.cmake)
+
+# ── whisper.cpp ──
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-
-if(HAVE_SYCL)
-    set(GGML_SYCL ON CACHE BOOL "Enable SYCL in whisper.cpp")
-    set(GGML_SYCL_DNN ON CACHE BOOL "Enable oneDNN in whisper.cpp SYCL backend")
-endif()
+set(GGML_SYCL ON CACHE BOOL "Enable SYCL in whisper.cpp")
+set(GGML_SYCL_DNN ON CACHE BOOL "Enable oneDNN in whisper.cpp SYCL backend")
 set(GGML_CUDA OFF CACHE BOOL "" FORCE)
 set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
 set(WHISPER_NO_EXAMPLES ON CACHE BOOL "" FORCE)
@@ -63,23 +58,14 @@ add_subdirectory(third_party/portaudio)
 
 add_subdirectory(whisper-xpu-core)
 add_subdirectory(whisper-xpu-app)
-
 add_subdirectory(tests)
 
-# ── Install rules ──
-include(GNUInstallDirs)
-
-# Release package: include/ + lib/ + sycl.dll
-set_target_properties(whisper_xpu_core PROPERTIES
-    PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/whisper-xpu-core/whisper_xpu_core.h"
+# ── Release package ──
+# Generates release/ with include/ + lib/ + bin/ (runtime DLLs)
+# Build: cmake --build . --target release
+configure_file(cmake/release.cmake.in "${CMAKE_BINARY_DIR}/release.cmake" @ONLY)
+add_custom_target(release
+    COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/release.cmake"
+    DEPENDS whisper_xpu_app
+    COMMENT "Creating release package in ${CMAKE_BINARY_DIR}/release/"
 )
-install(TARGETS whisper_xpu_core
-    ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
-
-# SYCL runtime DLL (required at runtime)
-if(HAVE_SYCL AND SYCL_LIBRARY_DIR)
-    install(FILES ${SYCL_LIBRARY_DIR}/sycl.dll DESTINATION ${CMAKE_INSTALL_BINDIR}
-        OPTIONAL)
-endif()
