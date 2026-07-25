@@ -1,0 +1,55 @@
+# Release packaging script — cmake -P release.cmake
+set(SRC_DIR "@CMAKE_SOURCE_DIR@")
+set(BIN_DIR "@CMAKE_BINARY_DIR@")
+set(REL_DIR "${BIN_DIR}/release")
+set(CFG "@CMAKE_BUILD_TYPE@")
+if(NOT CFG)
+    set(CFG "Release")
+endif()
+
+file(REMOVE_RECURSE "${REL_DIR}")
+file(MAKE_DIRECTORY "${REL_DIR}/include" "${REL_DIR}/lib" "${REL_DIR}/bin")
+
+# ── Headers ──
+file(COPY "${SRC_DIR}/whisper-xpu-core/whisper_xpu_core.h" DESTINATION "${REL_DIR}/include")
+file(COPY "${SRC_DIR}/whisper-xpu-core/export.h"           DESTINATION "${REL_DIR}/include")
+
+# ── Library ──
+set(LIB "${BIN_DIR}/whisper-xpu-core/${CFG}/whisper_xpu_core.lib")
+if(EXISTS "${LIB}")
+    file(COPY "${LIB}" DESTINATION "${REL_DIR}/lib")
+else()
+    message(FATAL_ERROR "whisper_xpu_core.lib not found")
+endif()
+
+# ── App ──
+set(APP "${BIN_DIR}/whisper-xpu-app/${CFG}/whisper_xpu_app.exe")
+if(EXISTS "${APP}")
+    file(COPY "${APP}" DESTINATION "${REL_DIR}/bin")
+    message(STATUS "App: ${APP}")
+endif()
+
+# ── Runtime DLLs ──
+# SYCL runtime (always needed in GPU build)
+set(SYCL_DLL "@SYCL_LIBRARY_DIR@/sycl.dll")
+if(EXISTS "${SYCL_DLL}")
+    file(COPY "${SYCL_DLL}" DESTINATION "${REL_DIR}/bin")
+endif()
+
+# oneDNN DLL (only when ONEDNN_STATIC=OFF)
+if("@ONEDNN_STATIC@" STREQUAL "OFF" AND "@DNNL_FOUND@" STREQUAL "TRUE")
+    get_target_property(DLL DNNL::dnnl IMPORTED_LOCATION_RELEASE)
+    if(DLL AND EXISTS "${DLL}")
+        file(COPY "${DLL}" DESTINATION "${REL_DIR}/bin")
+    endif()
+endif()
+
+# ── Summary ──
+file(GLOB_RECURSE FILES "${REL_DIR}/*")
+message(STATUS "Release: ${REL_DIR}")
+foreach(F ${FILES})
+    file(RELATIVE_PATH R "${REL_DIR}" "${F}")
+    get_filename_component(SZ "${F}" SIZE)
+    math(EXPR SZ "${SZ} / 1024")
+    message(STATUS "  ${R} (${SZ} KB)")
+endforeach()

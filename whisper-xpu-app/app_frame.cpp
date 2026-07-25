@@ -1,5 +1,5 @@
 #include "app_frame.h"
-#include "engine.h"
+#include "whisper_xpu_core.h"
 #include "device_detect.h"
 #include "audio_capture.h"
 

@@ -10,151 +10,87 @@
 #include <thread>
 #include <cstring>
 
-// ---------------------------------------------------------------------------
-// helpers (SYCL-free)
-// ---------------------------------------------------------------------------
+namespace whisper_xpu {
 
+// ---------------------------------------------------------------------------
 static std::string device_class_name(DeviceClass dc) {
     switch (dc) {
-        case DeviceClass::CPU:             return "CPU";
-        case DeviceClass::GPU_Integrated:  return "iGPU";
-        case DeviceClass::GPU_Discrete:    return "dGPU";
-        default:                           return "Unknown";
+        case DeviceClass::CPU: return "CPU";
+        case DeviceClass::GPU_Integrated: return "iGPU";
+        case DeviceClass::GPU_Discrete: return "dGPU";
+        default: return "Unknown";
     }
 }
 
 #ifdef WHISPER_XPU_HAS_SYCL
-
 static DeviceClass classify_device(const sycl::device &dev) {
-    if (dev.is_cpu())
-        return DeviceClass::CPU;
-    if (!dev.is_gpu())
-        return DeviceClass::Unknown;
+    if (dev.is_cpu() || !dev.is_gpu()) return dev.is_cpu() ? DeviceClass::CPU : DeviceClass::Unknown;
     bool integrated = false;
-    try {
-        integrated = dev.get_info<sycl::info::device::host_unified_memory>();
-    } catch (...) {
-        std::string name = dev.get_info<sycl::info::device::name>();
-        if (name.find("Graphics") != std::string::npos ||
-            name.find("UHD") != std::string::npos ||
-            name.find("Iris") != std::string::npos)
-            integrated = true;
-        else
-            integrated = false;
+    try { integrated = dev.get_info<sycl::info::device::host_unified_memory>(); }
+    catch (...) {
+        auto n = dev.get_info<sycl::info::device::name>();
+        integrated = (n.find("Graphics") != std::string::npos || n.find("UHD") != std::string::npos || n.find("Iris") != std::string::npos);
     }
     return integrated ? DeviceClass::GPU_Integrated : DeviceClass::GPU_Discrete;
 }
-
-#endif // WHISPER_XPU_HAS_SYCL
-
-// ---------------------------------------------------------------------------
-// public API
-// ---------------------------------------------------------------------------
-
-std::vector<DeviceInfo> get_available_devices() {
-    std::vector<DeviceInfo> list;
-
-    // ── CPU (always first) ──
-    {
-        DeviceInfo cpu;
-        cpu.index         = kDeviceCPU;
-        cpu.device_class  = DeviceClass::CPU;
-        cpu.name          = "CPU";
-        cpu.vendor        = "CPU";
-        cpu.compute_units = static_cast<int>(std::thread::hardware_concurrency());
-        cpu.total_mem     = 0;
-        cpu.free_mem      = 0;
-        list.push_back(cpu);
-    }
-
-#ifdef WHISPER_XPU_HAS_SYCL
-    try {
-        int sycl_device_idx = 0;
-        auto platforms = sycl::platform::get_platforms();
-        for (const auto &platform : platforms) {
-            auto devices = platform.get_devices(sycl::info::device_type::gpu);
-            for (const auto &dev : devices) {
-                DeviceInfo info;
-                info.index        = sycl_device_idx;
-                info.device_class = classify_device(dev);
-                info.name         = dev.get_info<sycl::info::device::name>();
-                info.vendor       = dev.get_info<sycl::info::device::vendor>();
-                info.compute_units = static_cast<int>(
-                    dev.get_info<sycl::info::device::max_compute_units>());
-                info.total_mem = dev.get_info<sycl::info::device::global_mem_size>();
-
-                size_t free_s = 0, total_s = 0;
-                ggml_backend_sycl_get_device_memory(sycl_device_idx, &free_s, &total_s);
-                info.free_mem = free_s;
-
-                list.push_back(info);
-                ++sycl_device_idx;
-            }
-        }
-    } catch (const std::exception &e) {
-        DeviceInfo err;
-        err.index        = -2;
-        err.device_class = DeviceClass::Unknown;
-        err.name         = "SYCL error: " + std::string(e.what());
-        list.push_back(err);
-    }
-#else
-    DeviceInfo sycl_disabled;
-    sycl_disabled.index        = -2;
-    sycl_disabled.device_class = DeviceClass::Unknown;
-    sycl_disabled.name         = "SYCL support not compiled in";
-    list.push_back(sycl_disabled);
 #endif
 
+// ---------------------------------------------------------------------------
+std::vector<DeviceInfo> get_available_devices() {
+    std::vector<DeviceInfo> list;
+    {
+        DeviceInfo cpu;
+        cpu.index = kDeviceCPU; cpu.device_class = DeviceClass::CPU; cpu.name = "CPU"; cpu.vendor = "CPU";
+        cpu.compute_units = (int)std::thread::hardware_concurrency(); cpu.total_mem = 0; cpu.free_mem = 0;
+        list.push_back(cpu);
+    }
+#ifdef WHISPER_XPU_HAS_SYCL
+    try {
+        int idx = 0;
+        for (auto &p : sycl::platform::get_platforms())
+            for (auto &d : p.get_devices(sycl::info::device_type::gpu)) {
+                DeviceInfo inf;
+                inf.index = idx; inf.device_class = classify_device(d);
+                inf.name = d.get_info<sycl::info::device::name>();
+                inf.vendor = d.get_info<sycl::info::device::vendor>();
+                inf.compute_units = (int)d.get_info<sycl::info::device::max_compute_units>();
+                inf.total_mem = d.get_info<sycl::info::device::global_mem_size>();
+                size_t f = 0, t = 0; ggml_backend_sycl_get_device_memory(idx, &f, &t); inf.free_mem = f;
+                list.push_back(inf); ++idx;
+            }
+    } catch (const std::exception &e) {
+        DeviceInfo err; err.index = -2; err.device_class = DeviceClass::Unknown; err.name = "SYCL error: " + std::string(e.what()); list.push_back(err);
+    }
+#else
+    { DeviceInfo s; s.index = -2; s.device_class = DeviceClass::Unknown; s.name = "SYCL not compiled"; list.push_back(s); }
+#endif
     return list;
 }
 
 bool has_intel_gpu() {
 #ifdef WHISPER_XPU_HAS_SYCL
-    try {
-        for (const auto &platform : sycl::platform::get_platforms()) {
-            auto gpus = platform.get_devices(sycl::info::device_type::gpu);
-            for (const auto &gpu : gpus) {
-                auto vendor = gpu.get_info<sycl::info::device::vendor>();
-                if (vendor.find("Intel") != std::string::npos) {
-                    return true;
-                }
-            }
-        }
-    } catch (...) {}
+    try { for (auto &p : sycl::platform::get_platforms()) for (auto &g : p.get_devices(sycl::info::device_type::gpu)) if (g.get_info<sycl::info::device::vendor>().find("Intel") != std::string::npos) return true; } catch (...) {}
 #endif
     return false;
 }
 
-DeviceInfo get_device_info(int device_index) {
-    auto devices = get_available_devices();
-    for (const auto &d : devices) {
-        if (d.index == device_index) return d;
-    }
-    // If running on a system with no GPU, devices may only have CPU.
-    // But if none matched at all (including CPU), return a fallback.
-    for (const auto &d : devices) {
-        if (d.index == kDeviceCPU) return d;
-    }
-    // Degenerate: no devices at all
-    DeviceInfo fallback;
-    fallback.index        = kDeviceCPU;
-    fallback.device_class = DeviceClass::CPU;
-    fallback.name         = "CPU";
-    return fallback;
+DeviceInfo get_device_info(int i) {
+    auto d = get_available_devices();
+    for (auto &x : d) if (x.index == i) return x;
+    for (auto &x : d) if (x.index == kDeviceCPU) return x;
+    DeviceInfo f; f.index = kDeviceCPU; f.device_class = DeviceClass::CPU; f.name = "CPU"; return f;
 }
 
 std::string DeviceInfo::to_string() const {
-    std::ostringstream oss;
-    oss << "[" << device_class_name(device_class) << "] " << name;
-    if (vendor != "CPU" && !vendor.empty())
-        oss << " (" << vendor << ")";
+    std::ostringstream os;
+    os << "[" << device_class_name(device_class) << "] " << name;
+    if (vendor != "CPU" && !vendor.empty()) os << " (" << vendor << ")";
     if (total_mem > 0) {
-        oss << " | VRAM: " << (total_mem / (1024 * 1024)) << " MB";
-        if (free_mem > 0)
-            oss << " (free: " << (free_mem / (1024 * 1024)) << " MB)";
+        os << " | VRAM: " << (total_mem / (1024*1024)) << " MB";
+        if (free_mem > 0) os << " (free: " << (free_mem / (1024*1024)) << " MB)";
     }
-    if (compute_units > 0)
-        oss << " | " << compute_units << " CUs";
-    return oss.str();
+    if (compute_units > 0) os << " | " << compute_units << " CUs";
+    return os.str();
 }
+
+} // namespace whisper_xpu
