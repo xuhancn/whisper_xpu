@@ -12,6 +12,7 @@
 
 namespace whisper_xpu {
     class Engine;
+    struct DeviceInfo;
 }
 
 class AudioCapture;
@@ -19,22 +20,25 @@ class AudioCapture;
 class AppFrame : public wxFrame {
 public:
     AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size,
-             const std::string& model_path, bool use_gpu);
+             const std::string& model_path, int device_index);
     virtual ~AppFrame();
 
 private:
     void OnToggleRecord(wxCommandEvent& event);
     void OnSelectModel(wxCommandEvent& event);
     void OnBrowseModel(wxCommandEvent& event);
+    void OnSelectDevice(wxCommandEvent& event);
     void OnClose(wxCloseEvent& event);
 
     void CreateControls();
     void PopulateModelList();
+    void PopulateDeviceList();
     void LogMessage(const wxString& text);
     void SetRecording(bool active);
     bool LoadEngine(const std::string& model_path);
 
     wxChoice*       m_modelChoice;
+    wxChoice*       m_deviceChoice;
     wxToggleButton* m_recordBtn;
     wxButton*       m_browseBtn;
     wxTextCtrl*     m_outputText;
@@ -45,13 +49,14 @@ private:
     std::unique_ptr<whisper_xpu::Engine> m_engine;
     std::unique_ptr<AudioCapture> m_audioCapture;
     std::string m_modelPath;
-    bool m_useGpu;
+    int m_deviceIndex;
     std::atomic<bool> m_recording{false};
     std::thread m_audioThread;
 
     enum {
         ID_TRANSCRIBE_RESULT = wxID_HIGHEST + 1,
         ID_TRANSCRIBE_ERROR,
+        ID_DEVICE_CHOICE,
     };
 
     wxDECLARE_EVENT_TABLE();
