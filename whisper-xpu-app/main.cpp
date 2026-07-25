@@ -2,11 +2,13 @@
 #include "app_frame.h"
 #include "device_detect.h"
 
+static constexpr int kDeviceAutoDetect = -2;
+
 class WhisperApp : public wxApp {
 public:
     virtual bool OnInit() override {
         wxString model_path;
-        int device_index = -2;  // -2 = auto-detect
+        int device_index = kDeviceAutoDetect;
         bool user_set_device = false;
 
         for (int i = 1; i < argc; ++i) {
