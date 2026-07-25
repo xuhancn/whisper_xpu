@@ -8,6 +8,7 @@ target_include_directories(whisper_xpu_core PUBLIC
 target_include_directories(whisper_xpu_core PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/whisper.cpp/include
     ${CMAKE_SOURCE_DIR}/third_party/whisper.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/sycl_src
 )
 
 target_link_libraries(whisper_xpu_core PUBLIC
