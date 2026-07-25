@@ -3,9 +3,7 @@ set(SRC_DIR "@CMAKE_SOURCE_DIR@")
 set(BIN_DIR "@CMAKE_BINARY_DIR@")
 set(REL_DIR "${BIN_DIR}/release")
 set(CFG "@CMAKE_BUILD_TYPE@")
-if(NOT CFG)
-    set(CFG "Release")
-endif()
+if(NOT CFG) set(CFG "Release") endif()
 
 file(REMOVE_RECURSE "${REL_DIR}")
 file(MAKE_DIRECTORY "${REL_DIR}/include" "${REL_DIR}/lib" "${REL_DIR}/bin")
@@ -16,41 +14,35 @@ file(COPY "${SRC_DIR}/whisper-xpu-core/export.h"           DESTINATION "${REL_DI
 
 # ── Library ──
 set(LIB "${BIN_DIR}/whisper-xpu-core/${CFG}/whisper_xpu_core.lib")
-if(EXISTS "${LIB}")
-    file(COPY "${LIB}" DESTINATION "${REL_DIR}/lib")
-else()
-    message(FATAL_ERROR "whisper_xpu_core.lib not found")
-endif()
+if(EXISTS "${LIB}")     file(COPY "${LIB}" DESTINATION "${REL_DIR}/lib")
+else()  message(FATAL_ERROR "whisper_xpu_core.lib not found")  endif()
 
 # ── App ──
 set(APP "${BIN_DIR}/whisper-xpu-app/${CFG}/whisper_xpu_app.exe")
-if(EXISTS "${APP}")
-    file(COPY "${APP}" DESTINATION "${REL_DIR}/bin")
-endif()
+if(EXISTS "${APP}")     file(COPY "${APP}" DESTINATION "${REL_DIR}/bin")  endif()
 
-# ── Intel oneAPI runtime DLLs ──
+# ── Intel oneAPI compiler runtime DLLs ──
 get_filename_component(_rt_root "@SYCL_LIBRARY_DIR@/.." ABSOLUTE)
-# SYCL runtime
-file(GLOB _rt_dlls "${_rt_root}/bin/sycl*.dll")
-# Intel compiler math library (needed by icx-compiled code)
-list(APPEND _rt_dlls "${_rt_root}/bin/svml_dispmd.dll")
-# Intel OpenMP runtime
-list(APPEND _rt_dlls "${_rt_root}/bin/libiomp5md.dll")
-foreach(_dll ${_rt_dlls})
-    if(EXISTS "${_dll}")
-        file(COPY "${_dll}" DESTINATION "${REL_DIR}/bin")
-    endif()
+file(GLOB _rt_dlls
+    "${_rt_root}/bin/sycl*.dll"
+    "${_rt_root}/bin/svml_dispmd.dll"
+    "${_rt_root}/bin/libmmd.dll"
+    "${_rt_root}/bin/libiomp5md.dll")
+foreach(_d ${_rt_dlls})
+    if(EXISTS "${_d}") file(COPY "${_d}" DESTINATION "${REL_DIR}/bin") endif()
 endforeach()
-if(NOT EXISTS "${_rt_root}/bin/sycl8.dll")
-    message(STATUS "SYCL runtime DLL not found in ${_rt_root}/bin/")
-endif()
 
-# ── oneDNN DLL (only when ONEDNN_STATIC=OFF) ──
+# ── Intel MKL SYCL DLLs ──
+get_filename_component(_mkl "${_rt_root}/../../mkl/latest" ABSOLUTE)
+file(GLOB _mkl_dlls "${_mkl}/bin/mkl_sycl*.dll")
+foreach(_d ${_mkl_dlls})
+    if(EXISTS "${_d}") file(COPY "${_d}" DESTINATION "${REL_DIR}/bin") endif()
+endforeach()
+
+# ── oneDNN DLL (ONEDNN_STATIC=OFF only) ──
 if("@ONEDNN_STATIC@" STREQUAL "OFF" AND "@DNNL_FOUND@" STREQUAL "TRUE")
-    get_target_property(_dll DNNL::dnnl IMPORTED_LOCATION_RELEASE)
-    if(_dll AND EXISTS "${_dll}")
-        file(COPY "${_dll}" DESTINATION "${REL_DIR}/bin")
-    endif()
+    get_target_property(_d DNNL::dnnl IMPORTED_LOCATION_RELEASE)
+    if(_d AND EXISTS "${_d}") file(COPY "${_d}" DESTINATION "${REL_DIR}/bin") endif()
 endif()
 
 # ── Summary ──
