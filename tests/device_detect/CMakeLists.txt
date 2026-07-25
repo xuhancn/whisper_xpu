@@ -1,6 +1,6 @@
 # ── Non-SYCL test (MSVC) ──
 add_executable(test_device_detect
-    test_device_detect.cpp
+    test_sycl_device_detect.cpp
     ${CMAKE_SOURCE_DIR}/whisper-xpu-core/sycl_src/device_detect.cpp
 )
 target_include_directories(test_device_detect PRIVATE
@@ -11,7 +11,7 @@ add_test(NAME device_detect/basics COMMAND test_device_detect)
 # ── SYCL test (Intel compiler, only when HAVE_SYCL) ──
 if(HAVE_SYCL)
     add_executable(test_device_detect_sycl
-        test_device_detect.cpp
+        test_sycl_device_detect.cpp
         ${CMAKE_SOURCE_DIR}/whisper-xpu-core/sycl_src/device_detect.cpp
     )
     target_include_directories(test_device_detect_sycl PRIVATE
