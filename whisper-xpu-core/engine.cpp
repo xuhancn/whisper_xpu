@@ -17,142 +17,71 @@
 namespace whisper_xpu {
 
 // ---------------------------------------------------------------------------
-// Minimal WAV file reader (16-bit PCM, converts to float32)
+// WAV loader
 // ---------------------------------------------------------------------------
 
 static bool load_wav(const std::string& path, std::vector<float>& out, int expected_sr = 16000) {
     std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) {
-        fprintf(stderr, "[whisper-xpu] Failed to open: %s\n", path.c_str());
-        return false;
-    }
+    if (!file.is_open()) return false;
 
-    auto read16 = [&]() -> uint16_t {
-        uint16_t v;
-        file.read(reinterpret_cast<char*>(&v), sizeof(v));
-        return v;
-    };
-    auto read32 = [&]() -> uint32_t {
-        uint32_t v;
-        file.read(reinterpret_cast<char*>(&v), sizeof(v));
-        return v;
-    };
+    auto read16 = [&]() -> uint16_t { uint16_t v; file.read((char*)&v, sizeof(v)); return v; };
+    auto read32 = [&]() -> uint32_t { uint32_t v; file.read((char*)&v, sizeof(v)); return v; };
 
-    // RIFF header
-    char riff[4];
-    file.read(riff, 4);
-    if (std::strncmp(riff, "RIFF", 4) != 0) {
-        fprintf(stderr, "[whisper-xpu] Not a RIFF file: %s\n", path.c_str());
-        return false;
-    }
-    read32(); // file size
-    char wave[4];
-    file.read(wave, 4);
-    if (std::strncmp(wave, "WAVE", 4) != 0) {
-        fprintf(stderr, "[whisper-xpu] Not a WAVE file: %s\n", path.c_str());
-        return false;
-    }
+    char riff[4]; file.read(riff, 4);
+    if (strncmp(riff, "RIFF", 4) != 0) return false;
+    read32();
+    char wave[4]; file.read(wave, 4);
+    if (strncmp(wave, "WAVE", 4) != 0) return false;
 
-    int channels = 0;
-    int sample_rate = 0;
-    int bits_per_sample = 0;
+    int channels = 0, sample_rate = 0, bits_per_sample = 0;
     std::vector<int16_t> pcm16;
 
     while (file.good()) {
-        char chunk_id[4];
-        file.read(chunk_id, 4);
-        uint32_t chunk_size = read32();
-
-        if (std::strncmp(chunk_id, "fmt ", 4) == 0) {
-            uint16_t audio_format = read16();
-            channels = read16();
-            sample_rate = static_cast<int>(read32());
-            read32(); // byte rate
-            read16(); // block align
-            bits_per_sample = read16();
-            if (audio_format != 1) {
-                fprintf(stderr, "[whisper-xpu] Unsupported WAV format (%d), need PCM\n", audio_format);
-                return false;
-            }
-        } else if (std::strncmp(chunk_id, "data", 4) == 0) {
-            size_t data_bytes = chunk_size;
-            if (bits_per_sample == 16) {
-                size_t n_samples = data_bytes / 2;
-                pcm16.resize(n_samples);
-                file.read(reinterpret_cast<char*>(pcm16.data()), static_cast<std::streamsize>(data_bytes));
-            } else if (bits_per_sample == 32) {
-                size_t n_samples = data_bytes / 4;
-                pcm16.resize(n_samples);
-                for (size_t i = 0; i < n_samples && file.good(); ++i) {
-                    int32_t s32;
-                    file.read(reinterpret_cast<char*>(&s32), 4);
-                    pcm16[i] = static_cast<int16_t>(s32 >> 16);
-                }
-            } else if (bits_per_sample == 8) {
-                size_t n_samples = data_bytes;
-                pcm16.resize(n_samples);
-                for (size_t i = 0; i < n_samples && file.good(); ++i) {
-                    uint8_t s8;
-                    file.read(reinterpret_cast<char*>(&s8), 1);
-                    pcm16[i] = static_cast<int16_t>((static_cast<int>(s8) - 128) << 8);
-                }
-            } else {
-                fprintf(stderr, "[whisper-xpu] Unsupported bits per sample: %d\n", bits_per_sample);
-                return false;
-            }
-        } else {
-            file.seekg(chunk_size, std::ios::cur);
-        }
+        char cid[4]; file.read(cid, 4);
+        uint32_t csz = read32();
+        if (memcmp(cid, "fmt ", 4) == 0) {
+            read16(); channels = read16(); sample_rate = (int)read32();
+            read32(); read16(); bits_per_sample = read16();
+            if (channels == 0) return false;
+        } else if (memcmp(cid, "data", 4) == 0) {
+            if (bits_per_sample == 16) { pcm16.resize(csz / 2); file.read((char*)pcm16.data(), csz); }
+            else file.seekg(csz, std::ios::cur);
+        } else file.seekg(csz, std::ios::cur);
     }
+    if (pcm16.empty() || sample_rate == 0) return false;
 
-    if (pcm16.empty() || channels == 0 || sample_rate == 0) {
-        fprintf(stderr, "[whisper-xpu] Invalid WAV file: no data\n");
-        return false;
-    }
-
-    // Convert to mono float32 at expected_sr
-    std::vector<float> mono_float;
+    // mono f32
+    std::vector<float> mono;
     if (channels == 1) {
-        mono_float.resize(pcm16.size());
-        for (size_t i = 0; i < pcm16.size(); ++i) {
-            mono_float[i] = pcm16[i] / 32768.0f;
-        }
+        mono.resize(pcm16.size());
+        for (size_t i = 0; i < pcm16.size(); i++) mono[i] = pcm16[i] / 32768.0f;
     } else {
-        size_t n_frames = pcm16.size() / channels;
-        mono_float.resize(n_frames);
-        for (size_t i = 0; i < n_frames; ++i) {
-            float sum = 0;
-            for (int c = 0; c < channels; ++c) {
-                sum += pcm16[i * channels + c] / 32768.0f;
-            }
-            mono_float[i] = sum / channels;
+        size_t nf = pcm16.size() / channels;
+        mono.resize(nf);
+        for (size_t i = 0; i < nf; i++) {
+            float s = 0; for (int c = 0; c < channels; c++) s += pcm16[i*channels+c] / 32768.0f;
+            mono[i] = s / channels;
         }
     }
 
     if (sample_rate != expected_sr) {
-        double ratio = static_cast<double>(expected_sr) / sample_rate;
-        size_t new_len = static_cast<size_t>(mono_float.size() * ratio);
-        std::vector<float> resampled(new_len);
-        for (size_t i = 0; i < new_len; ++i) {
-            double src_pos = i / ratio;
-            size_t src_i = static_cast<size_t>(src_pos);
-            double frac = src_pos - src_i;
-            float s0 = mono_float[std::min(src_i, mono_float.size() - 1)];
-            float s1 = mono_float[std::min(src_i + 1, mono_float.size() - 1)];
-            resampled[i] = s0 + static_cast<float>(frac) * (s1 - s0);
+        double ratio = (double)expected_sr / sample_rate;
+        size_t nl = (size_t)(mono.size() * ratio);
+        std::vector<float> r(nl);
+        for (size_t i = 0; i < nl; i++) {
+            double pos = i / ratio;
+            size_t si = (size_t)pos; double fr = pos - si;
+            float s0 = mono[std::min(si, mono.size()-1)];
+            float s1 = mono[std::min(si+1, mono.size()-1)];
+            r[i] = s0 + (float)fr * (s1 - s0);
         }
-        out.swap(resampled);
-    } else {
-        out.swap(mono_float);
-    }
-
-    fprintf(stderr, "[whisper-xpu] Loaded WAV: %s (%d ch, %d Hz, %zu samples, %d-bit)\n",
-            path.c_str(), channels, sample_rate, out.size(), bits_per_sample);
+        out.swap(r);
+    } else out.swap(mono);
     return true;
 }
 
 // ---------------------------------------------------------------------------
-// PIMPL structure
+// PIMPL
 // ---------------------------------------------------------------------------
 
 struct Engine::Impl {
@@ -163,48 +92,30 @@ struct Engine::Impl {
     int n_threads = 0;
 
     Impl() {
-        n_threads = static_cast<int>(std::thread::hardware_concurrency());
+        n_threads = (int)std::thread::hardware_concurrency();
         if (n_threads < 1) n_threads = 4;
     }
-
-    ~Impl() {
-        if (ctx) {
-            whisper_free(ctx);
-            ctx = nullptr;
-        }
-    }
+    ~Impl() { if (ctx) { whisper_free(ctx); ctx = nullptr; } }
 
     bool probe_sycl_device(int dev_id) {
 #ifdef WHISPER_XPU_HAS_SYCL
-        int device_count = ggml_backend_sycl_get_device_count();
-        if (device_count < 1) {
-            fprintf(stderr, "[whisper-xpu] No SYCL devices found (%d)\n", device_count);
-            return false;
-        }
-        if (dev_id >= device_count) {
-            fprintf(stderr, "[whisper-xpu] Device %d out of range (0-%d)\n", dev_id, device_count - 1);
-            return false;
-        }
-
+        int n = ggml_backend_sycl_get_device_count();
+        if (n < 1) return false;
+        if (dev_id >= n) return false;
         char desc[256] = {0};
         ggml_backend_sycl_get_device_description(dev_id, desc, sizeof(desc));
-
         size_t free_mem = 0, total_mem = 0;
         ggml_backend_sycl_get_device_memory(dev_id, &free_mem, &total_mem);
-
-        std::ostringstream oss;
-        oss << desc;
+        std::ostringstream oss; oss << desc;
         if (total_mem > 0) {
-            oss << " | VRAM: " << (total_mem / (1024 * 1024)) << " MB";
-            if (free_mem > 0)
-                oss << " (free: " << (free_mem / (1024 * 1024)) << " MB)";
+            oss << " | VRAM: " << (total_mem/(1024*1024)) << " MB";
+            if (free_mem > 0) oss << " (free: " << (free_mem/(1024*1024)) << " MB)";
         }
         device_desc = oss.str();
         fprintf(stderr, "[whisper-xpu] SYCL device %d: %s\n", dev_id, device_desc.c_str());
         return true;
 #else
-        (void)dev_id;
-        return false;
+        (void)dev_id; return false;
 #endif
     }
 };
@@ -214,95 +125,90 @@ struct Engine::Impl {
 // ---------------------------------------------------------------------------
 
 Engine::Engine(const std::string& model_path, int device_id)
-    : pimpl_(std::make_unique<Impl>())
-{
+    : pimpl_(std::make_unique<Impl>()) {
     pimpl_->device_id = device_id;
-
     if (device_id >= 0) {
 #ifdef WHISPER_XPU_HAS_SYCL
         pimpl_->gpu_initialized = pimpl_->probe_sycl_device(device_id);
-        if (!pimpl_->gpu_initialized) {
-            fprintf(stderr, "[whisper-xpu] GPU init failed, falling back to CPU\n");
-        }
+        if (!pimpl_->gpu_initialized) fprintf(stderr, "[whisper-xpu] GPU init failed, CPU fallback\n");
 #else
-        fprintf(stderr, "[whisper-xpu] Not compiled with SYCL support, using CPU\n");
+        fprintf(stderr, "[whisper-xpu] No SYCL support, using CPU\n");
 #endif
     }
-
     whisper_context_params cparams = whisper_context_default_params();
     cparams.use_gpu = pimpl_->gpu_initialized;
     cparams.gpu_device = device_id;
-
     pimpl_->ctx = whisper_init_from_file_with_params(model_path.c_str(), cparams);
-    if (!pimpl_->ctx) {
-        throw std::runtime_error("Failed to load whisper model: " + model_path);
-    }
-
-    if (!pimpl_->gpu_initialized) {
-        pimpl_->device_desc = "CPU (" + std::to_string(pimpl_->n_threads) + " threads)";
-    }
-
-    fprintf(stderr, "[whisper-xpu] Model loaded: %s\n", model_path.c_str());
-    fprintf(stderr, "[whisper-xpu] Device: %s\n", device_description().c_str());
+    if (!pimpl_->ctx) throw std::runtime_error("Failed to load model: " + model_path);
+    if (!pimpl_->gpu_initialized) pimpl_->device_desc = "CPU (" + std::to_string(pimpl_->n_threads) + " threads)";
+    fprintf(stderr, "[whisper-xpu] Model loaded, device: %s\n", device_description().c_str());
 }
 
 Engine::~Engine() = default;
 
 // ---------------------------------------------------------------------------
-// transcribe_file
+// transcribe_file (with optional VAD)
 // ---------------------------------------------------------------------------
 
-TranscriptionResult Engine::transcribe_file(const std::string& audio_path) {
-    if (!pimpl_->ctx) {
-        throw std::runtime_error("Engine not initialized");
-    }
+TranscriptionResult Engine::transcribe_file(const std::string& audio_path, const VadConfig& vad) {
+    if (!pimpl_->ctx) throw std::runtime_error("Engine not initialized");
 
     std::vector<float> pcm;
-    if (!load_wav(audio_path, pcm, 16000)) {
+    if (!load_wav(audio_path, pcm, WHISPER_SAMPLE_RATE))
         return TranscriptionResult{"", 0, 0, pimpl_->gpu_initialized};
-    }
-    if (pcm.empty()) {
+    if (pcm.empty())
         return TranscriptionResult{"", 0, 0, pimpl_->gpu_initialized};
-    }
 
+    int n_samples = (int)pcm.size();
     auto start_time = std::chrono::high_resolution_clock::now();
 
     auto wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-    wparams.print_realtime     = false;
-    wparams.print_progress     = false;
-    wparams.print_timestamps   = false;
-    wparams.print_special      = false;
-    wparams.translate          = false;
-    wparams.language           = "auto";
-    wparams.detect_language    = true;
-    wparams.n_threads          = pimpl_->n_threads;
-    wparams.offset_ms          = 0;
-    wparams.duration_ms        = 0;
-    wparams.single_segment     = false;
+    wparams.print_realtime   = false;
+    wparams.print_progress   = false;
+    wparams.print_timestamps = false;
+    wparams.print_special    = false;
+    wparams.translate        = false;
+    wparams.language         = "auto";
+    wparams.detect_language  = true;
+    wparams.n_threads        = pimpl_->n_threads;
+    wparams.offset_ms        = 0;
+    wparams.duration_ms      = 0;
+    wparams.single_segment   = false;
 
-    if (whisper_full(pimpl_->ctx, wparams, pcm.data(), static_cast<int>(pcm.size())) != 0) {
-        throw std::runtime_error("whisper_full() failed for: " + audio_path);
+    if (vad.enabled) {
+        wparams.vad = true;
+        wparams.vad_params.threshold            = vad.vad_threshold;
+        wparams.vad_params.min_speech_duration_ms = vad.min_speech_duration_ms;
+        wparams.vad_params.min_silence_duration_ms = vad.min_silence_duration_ms;
+        wparams.vad_params.max_speech_duration_s  = vad.max_speech_duration_s;
+        wparams.vad_params.speech_pad_ms          = vad.speech_pad_ms;
     }
 
+    if (whisper_full(pimpl_->ctx, wparams, pcm.data(), n_samples) != 0)
+        throw std::runtime_error("whisper_full() failed for: " + audio_path);
+
     std::string result;
-    const int n_segments = whisper_full_n_segments(pimpl_->ctx);
-    for (int i = 0; i < n_segments; ++i) {
+    int n_seg = whisper_full_n_segments(pimpl_->ctx);
+    for (int i = 0; i < n_seg; i++) {
         const char* text = whisper_full_get_segment_text(pimpl_->ctx, i);
         if (text) {
-            if (i > 0) result += " ";
+            // Dedup: skip if this segment's text is a near-duplicate of the last appended
+            if (i > 0) {
+                std::string prev = result;
+                // Check if the new text is mostly contained in the last part of result
+                // Simple heuristic: if result already ends with text, skip
+                if (prev.size() >= strlen(text) &&
+                    prev.compare(prev.size() - strlen(text), strlen(text), text) == 0)
+                    continue;
+            }
+            if (!result.empty()) result += " ";
             result += text;
         }
     }
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-
-    return TranscriptionResult{
-        result,
-        duration_ms,
-        n_segments,
-        pimpl_->gpu_initialized
-    };
+    auto end = std::chrono::high_resolution_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(end - start_time).count();
+    return TranscriptionResult{result, ms, n_seg, pimpl_->gpu_initialized};
 }
 
 // ---------------------------------------------------------------------------
@@ -310,88 +216,90 @@ TranscriptionResult Engine::transcribe_file(const std::string& audio_path) {
 // ---------------------------------------------------------------------------
 
 TranscriptionResult Engine::transcribe_stream(AudioSampleCallback callback) {
-    if (!pimpl_->ctx) {
-        throw std::runtime_error("Engine not initialized");
-    }
+    if (!pimpl_->ctx) throw std::runtime_error("Engine not initialized");
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    constexpr int SAMPLE_RATE = 16000;
-    constexpr int CHUNK_MS    = 3000;
-    constexpr int CHUNK_SIZE  = SAMPLE_RATE * CHUNK_MS / 1000;
+    constexpr int SR = WHISPER_SAMPLE_RATE;
+    constexpr int CHUNK_MS = 3000;
+    constexpr int CHUNK_SIZE = SR * CHUNK_MS / 1000;
 
-    std::vector<float> pcm_buffer(CHUNK_SIZE);
-    std::string full_result;
-    int total_segments = 0;
+    std::vector<float> buf(CHUNK_SIZE);
+    std::string full;
+    int total_seg = 0;
 
     while (true) {
-        size_t samples_read = callback(pcm_buffer.data(), CHUNK_SIZE);
-        if (samples_read == 0) break;
+        size_t n = callback(buf.data(), CHUNK_SIZE);
+        if (n == 0) break;
+        buf.resize(n);
 
-        pcm_buffer.resize(samples_read);
+        auto wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+        wp.print_realtime = false; wp.print_progress = false;
+        wp.print_timestamps = false; wp.print_special = false;
+        wp.translate = false; wp.language = "auto";
+        wp.detect_language = true; wp.n_threads = pimpl_->n_threads;
+        wp.single_segment = true; wp.no_context = true; wp.no_timestamps = true;
 
-        auto wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-        wparams.print_realtime     = false;
-        wparams.print_progress     = false;
-        wparams.print_timestamps   = false;
-        wparams.print_special      = false;
-        wparams.translate          = false;
-        wparams.language           = "auto";
-        wparams.detect_language    = true;
-        wparams.n_threads          = pimpl_->n_threads;
-        wparams.single_segment     = true;
-        wparams.no_context         = true;
-        wparams.no_timestamps      = true;
+        if (whisper_full(pimpl_->ctx, wp, buf.data(), (int)n) != 0) continue;
 
-        int ret = whisper_full(pimpl_->ctx, wparams, pcm_buffer.data(),
-                               static_cast<int>(samples_read));
-        if (ret != 0) {
-            fprintf(stderr, "[whisper-xpu] Warning: whisper_full() failed on chunk\n");
-            continue;
+        int ns = whisper_full_n_segments(pimpl_->ctx);
+        for (int i = 0; i < ns; i++) {
+            const char* t = whisper_full_get_segment_text(pimpl_->ctx, i);
+            if (t && strlen(t) > 0) { full += t; full += " "; }
         }
-
-        const int n = whisper_full_n_segments(pimpl_->ctx);
-        for (int i = 0; i < n; ++i) {
-            const char* text = whisper_full_get_segment_text(pimpl_->ctx, i);
-            if (text && strlen(text) > 0) {
-                full_result += text;
-                full_result += " ";
-            }
-        }
-        total_segments += n;
-
-        pcm_buffer.resize(CHUNK_SIZE);
+        total_seg += ns;
+        buf.resize(CHUNK_SIZE);
     }
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+    auto end = std::chrono::high_resolution_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(end - start_time).count();
+    if (!full.empty() && full.back() == ' ') full.pop_back();
+    return TranscriptionResult{full, ms, total_seg, pimpl_->gpu_initialized};
+}
 
-    if (!full_result.empty() && full_result.back() == ' ') {
-        full_result.pop_back();
+// ---------------------------------------------------------------------------
+// Benchmark
+// ---------------------------------------------------------------------------
+
+BenchmarkResult Engine::benchmark(const std::string& audio_path, const VadConfig& vad) {
+    std::vector<float> pcm;
+    if (!load_wav(audio_path, pcm, WHISPER_SAMPLE_RATE)) {
+        fprintf(stderr, "[whisper-xpu] benchmark: failed to load %s\n", audio_path.c_str());
+        return BenchmarkResult{};
     }
 
-    return TranscriptionResult{
-        full_result,
-        duration_ms,
-        total_segments,
-        pimpl_->gpu_initialized
-    };
+    double audio_duration_s = (double)pcm.size() / WHISPER_SAMPLE_RATE;
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    auto result = transcribe_file(audio_path, vad);
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    double wall_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    BenchmarkResult br;
+    br.total_audio_duration_s = audio_duration_s;
+    br.processing_time_ms     = wall_ms;
+    br.realtime_factor        = wall_ms / (audio_duration_s * 1000.0);
+    br.rtf                    = br.realtime_factor;
+
+    fprintf(stderr, "\n[whisper-xpu] === Benchmark ===\n");
+    fprintf(stderr, "  Audio duration:  %.1f s\n", audio_duration_s);
+    fprintf(stderr, "  Processing time: %.0f ms (%.2f s)\n", wall_ms, wall_ms / 1000.0);
+    fprintf(stderr, "  RTF:             %.2f (%.1fx realtime)\n", br.rtf, 1.0 / br.rtf);
+    fprintf(stderr, "  Segments:        %d\n", result.segment_count);
+    fprintf(stderr, "  VAD:             %s\n", vad.enabled ? "yes" : "no");
+    fprintf(stderr, "  Output length:   %zu chars\n", result.text.size());
+    fprintf(stderr, "==================\n");
+
+    return br;
 }
 
 // ---------------------------------------------------------------------------
 // Accessors
 // ---------------------------------------------------------------------------
 
-bool Engine::is_gpu_enabled() const {
-    return pimpl_->gpu_initialized;
-}
-
-std::string Engine::device_description() const {
-    return pimpl_->device_desc;
-}
-
-int Engine::device_id() const {
-    return pimpl_->device_id;
-}
+bool Engine::is_gpu_enabled() const { return pimpl_->gpu_initialized; }
+std::string Engine::device_description() const { return pimpl_->device_desc; }
+int Engine::device_id() const { return pimpl_->device_id; }
 
 } // namespace whisper_xpu
