@@ -53,7 +53,7 @@ private:
     std::unique_ptr<AudioCapture> m_audioCapture;
     std::string m_modelPath;
     int m_deviceIndex;
-    int m_micIndex = -1;   // -1 = system default
+    int m_micIndex = kMicDefault;   // use system default
     std::atomic<bool> m_recording{false};
     std::thread m_audioThread;
 

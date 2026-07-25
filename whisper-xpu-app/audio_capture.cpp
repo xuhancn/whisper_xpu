@@ -28,7 +28,7 @@ struct AudioCapture::Impl {
     PaStream* stream = nullptr;
     bool active = false;
     int sampleRate = 16000;
-    int deviceId = -1;
+    int deviceId = kMicDefault;
     AudioCaptureCallback callback;
 
     static int paCallback(const void* input, void* output,
@@ -104,9 +104,9 @@ std::vector<AudioDeviceInfo> AudioCapture::enumerate_devices() {
 bool AudioCapture::start(int device_id, int sample_rate, int frames_per_buffer) {
     if (pimpl_->active) return true;
 
-    // Determine device: -1 = system default, otherwise use specified
+    // kMicDefault = use system default; concrete index = use that device
     int device = device_id;
-    if (device < 0) {
+    if (device == kMicDefault) {
         device = Pa_GetDefaultInputDevice();
         if (device == paNoDevice) {
             fprintf(stderr, "[audio] No default input device found\n");
@@ -134,15 +134,9 @@ bool AudioCapture::start(int device_id, int sample_rate, int frames_per_buffer) 
     inputParams.hostApiSpecificStreamInfo = nullptr;
 
     PaError err = Pa_OpenStream(
-        &pimpl_->stream,
-        &inputParams,
-        nullptr,                // no output
-        sample_rate,
-        frames_per_buffer,
-        paClipOff,
-        Impl::paCallback,
-        pimpl_.get()
-    );
+        &pimpl_->stream, &inputParams, nullptr,
+        sample_rate, frames_per_buffer, paClipOff,
+        Impl::paCallback, pimpl_.get());
 
     if (err != paNoError) {
         fprintf(stderr, "[audio] OpenStream error: %s\n", Pa_GetErrorText(err));
@@ -167,13 +161,11 @@ bool AudioCapture::start(int device_id, int sample_rate, int frames_per_buffer) 
 
 void AudioCapture::stop() {
     if (!pimpl_->active) return;
-
     if (pimpl_->stream) {
         Pa_StopStream(pimpl_->stream);
         Pa_CloseStream(pimpl_->stream);
         pimpl_->stream = nullptr;
     }
-
     pimpl_->active = false;
     fprintf(stderr, "[audio] Capture stopped\n");
 }
@@ -182,14 +174,6 @@ void AudioCapture::set_callback(AudioCaptureCallback cb) {
     pimpl_->callback = std::move(cb);
 }
 
-bool AudioCapture::is_active() const {
-    return pimpl_->active;
-}
-
-int AudioCapture::sample_rate() const {
-    return pimpl_->sampleRate;
-}
-
-int AudioCapture::device_id() const {
-    return pimpl_->deviceId;
-}
+bool AudioCapture::is_active() const { return pimpl_->active; }
+int AudioCapture::sample_rate() const { return pimpl_->sampleRate; }
+int AudioCapture::device_id() const { return pimpl_->deviceId; }

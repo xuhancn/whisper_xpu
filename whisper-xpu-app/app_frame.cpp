@@ -11,24 +11,16 @@
 #include <sstream>
 #include <vector>
 
-// ---------------------------------------------------------------------------
-// Event table
-// ---------------------------------------------------------------------------
-
 wxBEGIN_EVENT_TABLE(AppFrame, wxFrame)
     EVT_CLOSE(AppFrame::OnClose)
 wxEND_EVENT_TABLE()
-
-// ---------------------------------------------------------------------------
-// Constructor / Destructor
-// ---------------------------------------------------------------------------
 
 AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size,
                    const std::string& model_path, int device_index)
     : wxFrame(nullptr, wxID_ANY, title, pos, size)
     , m_modelPath(model_path)
     , m_deviceIndex(device_index)
-    , m_micIndex(-1)
+    , m_micIndex(kMicDefault)
     , m_engine(nullptr)
     , m_audioCapture(nullptr)
 {
@@ -39,7 +31,6 @@ AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size
     PopulateDeviceList();
     PopulateMicList();
 
-    // Log available XPU devices
     {
         auto devices = whisper_xpu::get_available_devices();
         std::ostringstream oss;
@@ -66,10 +57,6 @@ AppFrame::~AppFrame() {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// UI Creation
-// ---------------------------------------------------------------------------
 
 void AppFrame::CreateControls() {
     auto* mainPanel = new wxPanel(this, wxID_ANY);
@@ -118,11 +105,8 @@ void AppFrame::CreateControls() {
     topSizer->Add(m_logText, 1, wxEXPAND | wxALL, 5);
 
     mainPanel->SetSizer(topSizer);
-
-    // Status bar
     m_statusBar = CreateStatusBar(2);
 
-    // Bind events
     m_browseBtn->Bind(wxEVT_BUTTON, &AppFrame::OnBrowseModel, this);
     m_recordBtn->Bind(wxEVT_TOGGLEBUTTON, &AppFrame::OnToggleRecord, this);
     m_deviceChoice->Bind(wxEVT_CHOICE, &AppFrame::OnSelectDevice, this);
@@ -143,18 +127,15 @@ void AppFrame::PopulateModelList() {
         LogMessage("Place model files (*.bin, *.ggml, *.gguf) in ./models/");
         return;
     }
-
     wxDir dir(m_modelDir);
     wxString filename;
     bool found = dir.GetFirst(&filename, "*.bin", wxDIR_FILES);
     if (!found) found = dir.GetFirst(&filename, "*.ggml", wxDIR_FILES);
     if (!found) found = dir.GetFirst(&filename, "*.gguf", wxDIR_FILES);
-
     while (found) {
         m_modelChoice->Append(filename);
         found = dir.GetNext(&filename);
     }
-
     if (m_modelChoice->GetCount() == 0) {
         LogMessage("No model files found in " + m_modelDir + ".");
     } else {
@@ -178,7 +159,6 @@ void AppFrame::PopulateDeviceList() {
 void AppFrame::PopulateMicList() {
     auto mics = AudioCapture::enumerate_devices();
     m_micChoice->Clear();
-    // First entry: system default
     m_micChoice->Append("System Default");
     int sel = 0;
     for (size_t i = 0; i < mics.size(); ++i) {
@@ -188,10 +168,6 @@ void AppFrame::PopulateMicList() {
     }
     m_micChoice->SetSelection(sel);
 }
-
-// ---------------------------------------------------------------------------
-// Event handlers
-// ---------------------------------------------------------------------------
 
 void AppFrame::OnSelectModel(wxCommandEvent& WXUNUSED(event)) {
     int sel = m_modelChoice->GetSelection();
@@ -224,18 +200,19 @@ void AppFrame::OnSelectDevice(wxCommandEvent& WXUNUSED(event)) {
 }
 
 void AppFrame::OnSelectMic(wxCommandEvent& WXUNUSED(event)) {
+    auto mics = AudioCapture::enumerate_devices();
     int sel = m_micChoice->GetSelection();
-    // sel 0 = system default (-1), sel >= 1 = device index from enumerate_devices
-    int new_mic = (sel <= 0) ? -1 : (sel - 1);
+    int new_mic = kMicDefault; // system default
+    if (sel > 0 && static_cast<size_t>(sel - 1) < mics.size()) {
+        new_mic = mics[sel - 1].index; // PortAudio device index
+    }
     if (new_mic != m_micIndex) {
         m_micIndex = new_mic;
-        auto mics = AudioCapture::enumerate_devices();
-        if (new_mic >= 0 && static_cast<size_t>(new_mic) < mics.size()) {
-            LogMessage("Mic changed to: " + wxString(mics[new_mic].to_string()));
+        if (new_mic >= 0) {
+            LogMessage("Mic changed to: " + wxString(mics[sel - 1].to_string()));
         } else {
             LogMessage("Mic changed to: System Default");
         }
-        // If recording is active, restart with new mic
         if (m_recording) {
             SetRecording(false);
             SetRecording(true);
@@ -280,10 +257,6 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Recording lifecycle
-// ---------------------------------------------------------------------------
-
 void AppFrame::SetRecording(bool active) {
     if (active == m_recording) return;
 
@@ -293,8 +266,7 @@ void AppFrame::SetRecording(bool active) {
         m_recordBtn->SetValue(true);
         m_statusBar->SetStatusText("🔴 Recording...");
         m_outputText->Clear();
-        LogMessage("Recording started (mic: " +
-                   wxString(m_micIndex < 0 ? "default" : "") + ")...");
+        LogMessage("Recording started...");
 
         auto sampleBuf = std::make_shared<std::vector<float>>();
         auto bufMutex  = std::make_shared<std::mutex>();
@@ -308,7 +280,6 @@ void AppFrame::SetRecording(bool active) {
             }
         );
 
-        // Start with user-selected mic (m_micIndex) or system default (-1)
         if (!m_audioCapture->start(m_micIndex)) {
             LogMessage("Error: Failed to start microphone capture.");
             m_recording = false;
@@ -328,7 +299,6 @@ void AppFrame::SetRecording(bool active) {
                         sampleBuf->clear();
                     }
                 }
-
                 if (!chunk.empty() && m_engine) {
                     auto result = m_engine->transcribe_stream(
                         [&chunk](float* buf, size_t max) -> size_t {
@@ -338,13 +308,11 @@ void AppFrame::SetRecording(bool active) {
                             return n;
                         }
                     );
-
                     if (!result.text.empty()) {
                         wxQueueEvent(this, new wxThreadEvent(
                             wxEVT_COMMAND_TEXT_UPDATED, ID_TRANSCRIBE_RESULT));
                     }
                 }
-
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
         });
