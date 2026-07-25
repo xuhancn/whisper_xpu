@@ -18,26 +18,16 @@ if(NOT SYCL_FOUND)
     message(FATAL_ERROR
         "Intel oneAPI SYCL toolkit not found.\n"
         "This project requires SYCL for XPU/GPU acceleration.\n"
-        "Install the Intel oneAPI Base Toolkit, then run setvars.bat (Windows)\n"
-        "or source setvars.sh (Linux).")
+        "Install the Intel oneAPI Base Toolkit:\n"
+        "  https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html\n"
+        "After installation, run setvars.bat (Windows) or source setvars.sh (Linux).")
 endif()
 
 set(HAVE_SYCL TRUE)
 add_compile_definitions(WHISPER_XPU_HAS_SYCL=1)
 message(STATUS "Intel oneAPI SYCL toolkit detected. GPU acceleration enabled.")
 
-# Verify the compiler supports -fsycl
-include(CheckCXXCompilerFlag)
-check_cxx_compiler_flag("-fsycl" CXX_SUPPORTS_FSYCL)
-if(NOT CXX_SUPPORTS_FSYCL)
-    message(FATAL_ERROR
-        "C++ compiler does not support -fsycl (compiler: ${CMAKE_CXX_COMPILER}).\n"
-        "Use icpx (Linux) / icx (Windows + Intel toolset).\n"
-        "  Linux:   cmake -DCMAKE_CXX_COMPILER=icpx -G Ninja ..\n"
-        "  Windows: call setvars.bat  # registers Intel C++ Compiler toolset")
-endif()
-
-# ── oneDNN ──
+# ── oneDNN detection ──
 option(ONEDNN_STATIC "Link oneDNN as static library (build from source)" ON)
 include(cmake/FindDNNL.cmake)
 
@@ -71,8 +61,11 @@ add_subdirectory(whisper-xpu-app)
 add_subdirectory(tests)
 
 # ── Release package ──
+# Generates release/ with include/ + lib/ + bin/ (runtime DLLs)
+# Build: cmake --build . --target release
 configure_file(cmake/release.cmake.in "${CMAKE_BINARY_DIR}/release.cmake" @ONLY)
 add_custom_target(release
     COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/release.cmake"
     DEPENDS whisper_xpu_app
-    COMMENT "Creating release package in ${CMAKE_BINARY_DIR}/release/")
+    COMMENT "Creating release package in ${CMAKE_BINARY_DIR}/release/"
+)
