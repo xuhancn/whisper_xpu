@@ -77,7 +77,6 @@ static bool load_wav(const std::string& path, std::vector<float>& out, int expec
 }
 
 // ---------------------------------------------------------------------------
-// merge_segments  (deduplicate overlapping suffixes)
 // ---------------------------------------------------------------------------
 
 // moved to merge_segments.cpp
@@ -186,7 +185,7 @@ TranscriptionResult Engine::transcribe_file(const std::string& audio_path, const
     wp.detect_language=true; wp.n_threads=pimpl_->n_threads;
 
     if (vad.enabled) {
-        wparams.vad_model_path = vad.vad_model_path;
+        wp.vad_model_path = vad.vad_model_path;
         wp.vad = true;
         wp.vad_params.threshold            = vad.vad_threshold;
         wp.vad_params.min_speech_duration_ms = vad.min_speech_duration_ms;
