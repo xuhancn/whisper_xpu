@@ -1,3 +1,5 @@
+namespace whisper_xpu {
+
 #include "device_detect.h"
 
 #ifdef WHISPER_XPU_HAS_SYCL
@@ -158,3 +160,5 @@ std::string DeviceInfo::to_string() const {
         oss << " | " << compute_units << " CUs";
     return oss.str();
 }
+
+} // namespace whisper_xpu

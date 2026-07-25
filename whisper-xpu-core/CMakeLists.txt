@@ -4,6 +4,14 @@ add_library(whisper_xpu_core STATIC
     merge_segments.cpp
 )
 
+# device_detect.cpp goes into whisper_xpu_core when SYCL is OFF,
+# or into whisper_xpu_core_sycl when SYCL is ON (compiled with Intel compiler + -fsycl)
+if(HAVE_SYCL)
+    set(SYCL_SOURCES sycl_src/device_detect.cpp)
+else()
+    target_sources(whisper_xpu_core PRIVATE sycl_src/device_detect.cpp)
+endif()
+
 target_include_directories(whisper_xpu_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -14,11 +22,11 @@ target_include_directories(whisper_xpu_core PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/sycl_src
 )
 
+target_compile_definitions(whisper_xpu_core PRIVATE WHISPER_XPU_BUILD_MAIN_LIB)
 target_link_libraries(whisper_xpu_core PUBLIC whisper)
 
 # ── SYCL sub-library ──
 if(HAVE_SYCL)
-    file(GLOB_RECURSE SYCL_SOURCES sycl_src/*.cpp)
     add_library(whisper_xpu_core_sycl STATIC ${SYCL_SOURCES})
 
     if(WIN32 AND CMAKE_GENERATOR MATCHES "Visual Studio")
@@ -51,9 +59,7 @@ if(WIN32)
     target_link_libraries(whisper_xpu_core PRIVATE winmm)
 endif()
 
-# ── Merge all dependency libs into one whisper_xpu_core.lib ──
-# External consumers only need:
-#   whisper_xpu_core.lib + sycl.dll + OpenCL.lib
+# ── Merge all dep .libs into one whisper_xpu_core.lib ──
 if(WIN32 AND NOT CMAKE_GENERATOR MATCHES "Ninja")
     set(MERGE_DEPS
         $<TARGET_FILE:whisper>
@@ -67,7 +73,6 @@ if(WIN32 AND NOT CMAKE_GENERATOR MATCHES "Ninja")
     if(TARGET whisper_xpu_core_sycl)
         list(APPEND MERGE_DEPS $<TARGET_FILE:whisper_xpu_core_sycl>)
     endif()
-    # When oneDNN is statically linked, include its static lib
     if(TARGET DNNL::dnnl AND ONEDNN_STATIC)
         list(APPEND MERGE_DEPS $<TARGET_FILE:DNNL::dnnl>)
     endif()

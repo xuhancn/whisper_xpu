@@ -8,6 +8,8 @@
 #include <wx/statusbr.h>
 #include <memory>
 #include <atomic>
+#include "device_detect.h"
+#include "audio_capture.h"
 #include <thread>
 
 namespace whisper_xpu {
