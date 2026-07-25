@@ -24,10 +24,10 @@ wxEND_EVENT_TABLE()
 // ---------------------------------------------------------------------------
 
 AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size,
-                   const std::string& model_path, bool use_gpu)
+                   const std::string& model_path, int device_index)
     : wxFrame(nullptr, wxID_ANY, title, pos, size)
     , m_modelPath(model_path)
-    , m_useGpu(use_gpu)
+    , m_deviceIndex(device_index)
     , m_engine(nullptr)
     , m_audioCapture(nullptr)
 {
@@ -35,19 +35,18 @@ AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size
 
     CreateControls();
     PopulateModelList();
+    PopulateDeviceList();
 
-    // Detect and log available devices
+    // Log available devices
     {
-        auto devices = detect_devices();
+        auto devices = whisper_xpu::get_available_devices();
         std::ostringstream oss;
         oss << "=== Available Devices ===\n";
         for (const auto& d : devices) {
-            oss << "  " << d << "\n";
+            oss << "  " << d.to_string() << "\n";
         }
         LogMessage(oss.str());
     }
-
-    LogMessage("Best device: " + wxString(get_best_device_name()));
 
     if (!m_modelPath.empty()) {
         LoadEngine(m_modelPath);
@@ -86,6 +85,14 @@ void AppFrame::CreateControls() {
     modelSizer->Add(m_recordBtn, 0, wxALL, 5);
     topSizer->Add(modelSizer, 0, wxEXPAND);
 
+    // Device row
+    auto* deviceSizer = new wxBoxSizer(wxHORIZONTAL);
+    deviceSizer->Add(new wxStaticText(mainPanel, wxID_ANY, "Device:"),
+                     0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
+    m_deviceChoice = new wxChoice(mainPanel, ID_DEVICE_CHOICE);
+    deviceSizer->Add(m_deviceChoice, 1, wxEXPAND | wxALL, 5);
+    topSizer->Add(deviceSizer, 0, wxEXPAND);
+
     // Transcription output
     m_outputText = new wxTextCtrl(mainPanel, wxID_ANY, "",
                                   wxDefaultPosition, wxDefaultSize,
@@ -108,6 +115,7 @@ void AppFrame::CreateControls() {
     // Bind events
     m_browseBtn->Bind(wxEVT_BUTTON, &AppFrame::OnBrowseModel, this);
     m_recordBtn->Bind(wxEVT_TOGGLEBUTTON, &AppFrame::OnToggleRecord, this);
+    m_deviceChoice->Bind(wxEVT_CHOICE, &AppFrame::OnSelectDevice, this);
     Bind(wxEVT_COMMAND_TEXT_UPDATED, [this](wxCommandEvent& ev) {
         if (ev.GetId() == ID_TRANSCRIBE_RESULT) {
             m_outputText->AppendText(ev.GetString());
@@ -143,6 +151,19 @@ void AppFrame::PopulateModelList() {
     }
 }
 
+void AppFrame::PopulateDeviceList() {
+    auto devices = whisper_xpu::get_available_devices();
+    m_deviceChoice->Clear();
+    int sel = 0;
+    for (size_t i = 0; i < devices.size(); ++i) {
+        m_deviceChoice->Append(wxString(devices[i].to_string()));
+        if (devices[i].index == m_deviceIndex)
+            sel = static_cast<int>(i);
+    }
+    if (!devices.empty())
+        m_deviceChoice->SetSelection(sel);
+}
+
 // ---------------------------------------------------------------------------
 // Event handlers
 // ---------------------------------------------------------------------------
@@ -163,10 +184,24 @@ void AppFrame::OnBrowseModel(wxCommandEvent& WXUNUSED(event)) {
     LoadEngine(dialog.GetPath().ToStdString());
 }
 
+void AppFrame::OnSelectDevice(wxCommandEvent& WXUNUSED(event)) {
+    auto devices = whisper_xpu::get_available_devices();
+    int sel = m_deviceChoice->GetSelection();
+    if (sel == wxNOT_FOUND || static_cast<size_t>(sel) >= devices.size()) return;
+    int new_index = devices[sel].index;
+    if (new_index != m_deviceIndex) {
+        m_deviceIndex = new_index;
+        LogMessage("Device changed to: " + wxString(devices[sel].to_string()));
+        if (m_engine && !m_modelPath.empty()) {
+            LoadEngine(m_modelPath);
+        }
+    }
+}
+
 bool AppFrame::LoadEngine(const std::string& path) {
     if (m_recording) SetRecording(false);
     try {
-        m_engine = std::make_unique<whisper_xpu::Engine>(path, m_useGpu);
+        m_engine = std::make_unique<whisper_xpu::Engine>(path, m_deviceIndex);
         m_modelPath = path;
         std::ostringstream oss;
         oss << "Loaded: " << path;
@@ -208,7 +243,6 @@ void AppFrame::SetRecording(bool active) {
     if (active == m_recording) return;
 
     if (active) {
-        // Start
         m_recording = true;
         m_recordBtn->SetLabel("⏹  Stop Recording");
         m_recordBtn->SetValue(true);
@@ -216,11 +250,9 @@ void AppFrame::SetRecording(bool active) {
         m_outputText->Clear();
         LogMessage("Recording started...");
 
-        // Shared sample buffer (thread-safe via mutex)
         auto sampleBuf = std::make_shared<std::vector<float>>();
         auto bufMutex  = std::make_shared<std::mutex>();
 
-        // Set up capture callback: PortAudio thread pushes samples
         m_audioCapture = std::make_unique<AudioCapture>();
         m_audioCapture->set_callback(
             [sampleBuf, bufMutex](const float* samples, size_t count) -> size_t {
@@ -239,20 +271,18 @@ void AppFrame::SetRecording(bool active) {
             return;
         }
 
-        // Processing thread: periodically drain the buffer and run inference
         m_audioThread = std::thread([this, sampleBuf, bufMutex]() {
             while (m_recording) {
                 std::vector<float> chunk;
                 {
                     std::lock_guard<std::mutex> lock(*bufMutex);
-                    if (sampleBuf->size() >= 16000) { // at least 1 second
+                    if (sampleBuf->size() >= 16000) {
                         chunk.assign(sampleBuf->begin(), sampleBuf->end());
                         sampleBuf->clear();
                     }
                 }
 
                 if (!chunk.empty() && m_engine) {
-                    // Run inference
                     auto result = m_engine->transcribe_stream(
                         [&chunk](float* buf, size_t max) -> size_t {
                             size_t n = std::min(chunk.size(), max);
@@ -263,7 +293,6 @@ void AppFrame::SetRecording(bool active) {
                     );
 
                     if (!result.text.empty()) {
-                        // Post result text to UI thread
                         wxQueueEvent(this, new wxThreadEvent(
                             wxEVT_COMMAND_TEXT_UPDATED, ID_TRANSCRIBE_RESULT));
                     }
@@ -273,7 +302,6 @@ void AppFrame::SetRecording(bool active) {
             }
         });
     } else {
-        // Stop
         m_recording = false;
         if (m_audioThread.joinable()) m_audioThread.join();
         if (m_audioCapture) {

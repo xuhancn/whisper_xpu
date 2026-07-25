@@ -22,8 +22,8 @@ class Engine {
 public:
     // Load a whisper model.
     // model_path: path to a GGML model file (.bin or .ggml)
-    // use_gpu: if true, attempt SYCL/GPU acceleration; falls back to CPU on failure
-    Engine(const std::string& model_path, bool use_gpu = true);
+    // device_id: -1 = CPU, 0+ = GPU device index from get_available_devices()
+    Engine(const std::string& model_path, int device_id = 0);
 
     ~Engine();
 
@@ -34,7 +34,6 @@ public:
     TranscriptionResult transcribe_file(const std::string& audio_path);
 
     // Transcribe streaming audio via callback.
-    // callback is invoked repeatedly to get PCM f32 16kHz samples.
     TranscriptionResult transcribe_stream(AudioSampleCallback callback);
 
     // Returns true if GPU acceleration was successfully initialized
@@ -42,6 +41,9 @@ public:
 
     // Returns a description of the compute device in use
     std::string device_description() const;
+
+    // Returns the device index in use (-1 for CPU)
+    int device_id() const;
 
 private:
     struct Impl;

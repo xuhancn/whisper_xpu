@@ -5,7 +5,6 @@ target_include_directories(whisper_xpu_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-# whisper.cpp headers
 target_include_directories(whisper_xpu_core PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/whisper.cpp/include
     ${CMAKE_SOURCE_DIR}/third_party/whisper.cpp/ggml/include
@@ -34,7 +33,8 @@ if(HAVE_SYCL)
     target_include_directories(whisper_xpu_core_sycl PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/sycl_src
-        ${SYCL_INCLUDE_DIR})
+        ${SYCL_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party/whisper.cpp/ggml/include)
     target_compile_definitions(whisper_xpu_core_sycl PRIVATE WHISPER_XPU_HAS_SYCL)
 
     if(SYCL_LIBRARY_DIR)
