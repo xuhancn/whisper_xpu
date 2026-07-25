@@ -44,6 +44,7 @@ int main(int argc, char** argv) {
     vad.max_speech_duration_s = 5.0f;
     vad.speech_pad_ms = 500;
     vad.vad_threshold = 0.5f;
+    vad.vad_model_path = "D:/xu_github/whisper_xpu/models/ggml-vad.bin";
 
     fprintf(stderr, "\n=== transcribe_file (VAD) ===\n");
     auto r1 = engine.transcribe_file(audio_path, vad);

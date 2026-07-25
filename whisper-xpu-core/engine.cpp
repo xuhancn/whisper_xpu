@@ -1,3 +1,4 @@
+#include "merge_segments.h"
 #include "engine.h"
 #include "device_detect.h"
 
@@ -79,6 +80,7 @@ static bool load_wav(const std::string& path, std::vector<float>& out, int expec
 // merge_segments  (deduplicate overlapping suffixes)
 // ---------------------------------------------------------------------------
 
+// moved to merge_segments.cpp
 std::string merge_segments(const std::vector<const char*>& segments) {
     std::string result;
     for (size_t i = 0; i < segments.size(); i++) {
@@ -108,6 +110,7 @@ std::string merge_segments(const std::vector<const char*>& segments) {
     return result;
 }
 
+// moved to merge_segments.cpp
 std::string merge_segments(const std::vector<std::string>& segments) {
     std::vector<const char*> ptrs;
     ptrs.reserve(segments.size());
@@ -183,6 +186,7 @@ TranscriptionResult Engine::transcribe_file(const std::string& audio_path, const
     wp.detect_language=true; wp.n_threads=pimpl_->n_threads;
 
     if (vad.enabled) {
+        wparams.vad_model_path = vad.vad_model_path;
         wp.vad = true;
         wp.vad_params.threshold            = vad.vad_threshold;
         wp.vad_params.min_speech_duration_ms = vad.min_speech_duration_ms;

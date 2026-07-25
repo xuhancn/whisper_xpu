@@ -1,5 +1,6 @@
 # ── Main core library (MSVC) ──
-add_library(whisper_xpu_core STATIC engine.cpp)
+add_library(whisper_xpu_core STATIC engine.cpp
+    merge_segments.cpp)
 
 target_include_directories(whisper_xpu_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}

@@ -28,13 +28,10 @@ struct VadConfig {
     float  vad_threshold         = 0.5f;
     int    min_speech_duration_ms = 250;
     int    min_silence_duration_ms = 100;
+    const char* vad_model_path   = nullptr;  // path to ggml-vad.bin
 };
 
 using AudioSampleCallback = std::function<size_t(float* buffer, size_t max_samples)>;
-
-// Merge transcribed text segments, deduplicating overlapping suffixes.
-std::string merge_segments(const std::vector<const char*>& segments);
-std::string merge_segments(const std::vector<std::string>& segments);
 
 class Engine {
 public:

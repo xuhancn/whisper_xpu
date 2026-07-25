@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
-#include "engine.h"
+#include "merge_segments.h"
 
-using whisper_xpu::merge_segments;
+using whisper_xpu::merge_segments;// from merge_segments.h
 
 TEST(MergeSegments, Empty) {
     EXPECT_EQ(merge_segments({}), "");
