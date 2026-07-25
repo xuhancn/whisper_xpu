@@ -38,7 +38,7 @@ if(HAVE_SYCL)
     target_compile_definitions(whisper_xpu_core_sycl PRIVATE WHISPER_XPU_HAS_SYCL)
 
     if(SYCL_LIBRARY_DIR)
-        target_link_directories(whisper_xpu_core_sycl PRIVATE ${SYCL_LIBRARY_DIR})
+        target_link_directories(whisper_xpu_core_sycl PUBLIC ${SYCL_LIBRARY_DIR})
     endif()
     target_link_libraries(whisper_xpu_core_sycl PUBLIC sycl)
 
