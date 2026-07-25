@@ -1,6 +1,8 @@
-# ── Main core library (MSVC) ──
-add_library(whisper_xpu_core STATIC engine.cpp
-    merge_segments.cpp)
+# ── Main core library ──
+add_library(whisper_xpu_core STATIC
+    engine.cpp
+    merge_segments.cpp
+)
 
 target_include_directories(whisper_xpu_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -12,11 +14,9 @@ target_include_directories(whisper_xpu_core PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/sycl_src
 )
 
-target_link_libraries(whisper_xpu_core PUBLIC
-    whisper
-)
+target_link_libraries(whisper_xpu_core PUBLIC whisper)
 
-# ── SYCL sub-library (Intel C++ Compiler + -fsycl) ──
+# ── SYCL sub-library ──
 if(HAVE_SYCL)
     file(GLOB_RECURSE SYCL_SOURCES sycl_src/*.cpp)
     add_library(whisper_xpu_core_sycl STATIC ${SYCL_SOURCES})
@@ -49,4 +49,33 @@ endif()
 
 if(WIN32)
     target_link_libraries(whisper_xpu_core PRIVATE winmm)
+endif()
+
+# ── Merge all dependency libs into one whisper_xpu_core.lib ──
+# External consumers only need:
+#   whisper_xpu_core.lib + sycl.dll + OpenCL.lib
+if(WIN32 AND NOT CMAKE_GENERATOR MATCHES "Ninja")
+    set(MERGE_DEPS
+        $<TARGET_FILE:whisper>
+        $<TARGET_FILE:ggml>
+        $<TARGET_FILE:ggml-base>
+        $<TARGET_FILE:ggml-cpu>
+    )
+    if(TARGET ggml-sycl)
+        list(APPEND MERGE_DEPS $<TARGET_FILE:ggml-sycl>)
+    endif()
+    if(TARGET whisper_xpu_core_sycl)
+        list(APPEND MERGE_DEPS $<TARGET_FILE:whisper_xpu_core_sycl>)
+    endif()
+    # When oneDNN is statically linked, include its static lib
+    if(TARGET DNNL::dnnl AND ONEDNN_STATIC)
+        list(APPEND MERGE_DEPS $<TARGET_FILE:DNNL::dnnl>)
+    endif()
+
+    add_custom_command(TARGET whisper_xpu_core POST_BUILD
+        COMMAND lib.exe /OUT:$<TARGET_FILE:whisper_xpu_core>
+            $<TARGET_FILE:whisper_xpu_core>
+            ${MERGE_DEPS}
+        COMMENT "Merging libraries into whisper_xpu_core.lib"
+    )
 endif()

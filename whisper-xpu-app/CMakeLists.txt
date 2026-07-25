@@ -7,6 +7,7 @@ add_executable(whisper_xpu_app WIN32
 target_include_directories(whisper_xpu_app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/third_party/whisper.cpp/include
+    ${CMAKE_SOURCE_DIR}/whisper-xpu-core
     ${CMAKE_SOURCE_DIR}/whisper-xpu-core/sycl_src
 )
 

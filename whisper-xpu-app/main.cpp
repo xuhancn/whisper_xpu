@@ -1,6 +1,6 @@
 #include <wx/wx.h>
 #include "app_frame.h"
-#include "device_detect.h"
+// included via whisper_xpu_core.h
 
 class WhisperApp : public wxApp {
 public:
