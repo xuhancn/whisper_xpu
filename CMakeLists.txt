@@ -64,8 +64,8 @@ set(GGML_CUDA OFF CACHE BOOL "" FORCE)
 set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
 set(WHISPER_NO_EXAMPLES ON CACHE BOOL "" FORCE)
 set(WHISPER_NO_TESTS ON CACHE BOOL "" FORCE)
-set(GGML_STATIC ON)
-set(BUILD_SHARED_LIBS OFF)
+set(GGML_STATIC ON CACHE BOOL "Build ggml as static library" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
 add_subdirectory(third_party/whisper.cpp)
 
 # ── wxWidgets (static, minimal) ──
