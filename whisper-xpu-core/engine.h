@@ -15,22 +15,26 @@ struct TranscriptionResult {
 };
 
 struct BenchmarkResult {
-    double total_audio_duration_s;   // actual audio length processed
-    double processing_time_ms;       // wall-clock time
-    double realtime_factor;          // processing_time_ms / (total_audio_duration_s * 1000)
-    double rtf;                      // shorthand
+    double total_audio_duration_s;
+    double processing_time_ms;
+    double realtime_factor;
+    double rtf;
 };
 
 struct VadConfig {
     bool   enabled               = false;
-    float  max_speech_duration_s = 5.0f;   // max seconds per VAD segment
-    int    speech_pad_ms         = 500;    // padding around speech (1s total overlap)
-    float  vad_threshold         = 0.5f;   // VAD probability threshold
-    int    min_speech_duration_ms = 250;   // min valid speech duration
-    int    min_silence_duration_ms = 100;  // min silence to split
+    float  max_speech_duration_s = 5.0f;
+    int    speech_pad_ms         = 500;
+    float  vad_threshold         = 0.5f;
+    int    min_speech_duration_ms = 250;
+    int    min_silence_duration_ms = 100;
 };
 
 using AudioSampleCallback = std::function<size_t(float* buffer, size_t max_samples)>;
+
+// Merge transcribed text segments, deduplicating overlapping suffixes.
+std::string merge_segments(const std::vector<const char*>& segments);
+std::string merge_segments(const std::vector<std::string>& segments);
 
 class Engine {
 public:
@@ -40,14 +44,11 @@ public:
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
 
-    // Transcribe a full audio file.
     TranscriptionResult transcribe_file(const std::string& audio_path,
                                         const VadConfig& vad = VadConfig{});
 
-    // Transcribe streaming audio via callback.
     TranscriptionResult transcribe_stream(AudioSampleCallback callback);
 
-    // Run benchmark on an audio file with given VAD config.
     BenchmarkResult benchmark(const std::string& audio_path, const VadConfig& vad);
 
     bool is_gpu_enabled() const;
