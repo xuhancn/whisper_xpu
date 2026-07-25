@@ -11,20 +11,29 @@
 #include <cstring>
 
 // ---------------------------------------------------------------------------
-// helpers
+// helpers (SYCL-free)
 // ---------------------------------------------------------------------------
+
+static std::string device_class_name(DeviceClass dc) {
+    switch (dc) {
+        case DeviceClass::CPU:             return "CPU";
+        case DeviceClass::GPU_Integrated:  return "iGPU";
+        case DeviceClass::GPU_Discrete:    return "dGPU";
+        default:                           return "Unknown";
+    }
+}
+
+#ifdef WHISPER_XPU_HAS_SYCL
 
 static DeviceClass classify_device(const sycl::device &dev) {
     if (dev.is_cpu())
         return DeviceClass::CPU;
     if (!dev.is_gpu())
         return DeviceClass::Unknown;
-    // iGPU shares system memory with the host; dGPU has dedicated VRAM.
     bool integrated = false;
     try {
         integrated = dev.get_info<sycl::info::device::host_unified_memory>();
     } catch (...) {
-        // fallback: guess from name
         std::string name = dev.get_info<sycl::info::device::name>();
         if (name.find("Graphics") != std::string::npos ||
             name.find("UHD") != std::string::npos ||
@@ -36,14 +45,7 @@ static DeviceClass classify_device(const sycl::device &dev) {
     return integrated ? DeviceClass::GPU_Integrated : DeviceClass::GPU_Discrete;
 }
 
-static std::string device_class_name(DeviceClass dc) {
-    switch (dc) {
-        case DeviceClass::CPU:             return "CPU";
-        case DeviceClass::GPU_Integrated:  return "iGPU";
-        case DeviceClass::GPU_Discrete:    return "dGPU";
-        default:                           return "Unknown";
-    }
-}
+#endif // WHISPER_XPU_HAS_SYCL
 
 // ---------------------------------------------------------------------------
 // public API
@@ -55,7 +57,7 @@ std::vector<DeviceInfo> get_available_devices() {
     // ── CPU (always first) ──
     {
         DeviceInfo cpu;
-        cpu.index         = -1;
+        cpu.index         = kDeviceCPU;
         cpu.device_class  = DeviceClass::CPU;
         cpu.name          = "CPU";
         cpu.vendor        = "CPU";
@@ -70,7 +72,6 @@ std::vector<DeviceInfo> get_available_devices() {
         int sycl_device_idx = 0;
         auto platforms = sycl::platform::get_platforms();
         for (const auto &platform : platforms) {
-            // Enumerate all GPU devices
             auto devices = platform.get_devices(sycl::info::device_type::gpu);
             for (const auto &dev : devices) {
                 DeviceInfo info;
@@ -82,10 +83,9 @@ std::vector<DeviceInfo> get_available_devices() {
                     dev.get_info<sycl::info::device::max_compute_units>());
                 info.total_mem = dev.get_info<sycl::info::device::global_mem_size>();
 
-                // Free memory via ggml-backend SYCL (works at runtime)
-                size_t free_sycl = 0, total_sycl = 0;
-                ggml_backend_sycl_get_device_memory(sycl_device_idx, &free_sycl, &total_sycl);
-                info.free_mem = free_sycl;
+                size_t free_s = 0, total_s = 0;
+                ggml_backend_sycl_get_device_memory(sycl_device_idx, &free_s, &total_s);
+                info.free_mem = free_s;
 
                 list.push_back(info);
                 ++sycl_device_idx;
@@ -131,13 +131,14 @@ DeviceInfo get_device_info(int device_index) {
     for (const auto &d : devices) {
         if (d.index == device_index) return d;
     }
-    // Fallback: return the CPU entry
+    // If running on a system with no GPU, devices may only have CPU.
+    // But if none matched at all (including CPU), return a fallback.
     for (const auto &d : devices) {
-        if (d.index == -1) return d;
+        if (d.index == kDeviceCPU) return d;
     }
-    // Degenerate case
+    // Degenerate: no devices at all
     DeviceInfo fallback;
-    fallback.index        = -1;
+    fallback.index        = kDeviceCPU;
     fallback.device_class = DeviceClass::CPU;
     fallback.name         = "CPU";
     return fallback;
