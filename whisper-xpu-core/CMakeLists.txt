@@ -1,39 +1,5 @@
-add_library(whisper_xpu_core STATIC
-    engine.cpp
-)
-
-if(HAVE_SYCL)
-    # ── SYCL source files ──
-    # All files in sycl_src/ are compiled with Intel C++ Compiler and -fsycl.
-    file(GLOB SYCL_SOURCES sycl_src/*.cpp)
-    target_sources(whisper_xpu_core PRIVATE ${SYCL_SOURCES})
-    target_include_directories(whisper_xpu_core PRIVATE ${SYCL_INCLUDE_DIR})
-    target_compile_definitions(whisper_xpu_core PRIVATE WHISPER_XPU_HAS_SYCL)
-
-    if(WIN32 AND CMAKE_GENERATOR MATCHES "Visual Studio")
-        if(DEFINED ENV{DNNL_INTEL_TOOLSET})
-            set(_sycl_toolset "$ENV{DNNL_INTEL_TOOLSET}")
-        else()
-            set(_sycl_toolset "Intel C++ Compiler 2025")
-        endif()
-        foreach(_src ${SYCL_SOURCES})
-            set_source_files_properties(${_src} PROPERTIES
-                VS_TOOLSET_OVERRIDE "${_sycl_toolset}"
-                COMPILE_FLAGS "-fsycl")
-        endforeach()
-    else()
-        foreach(_src ${SYCL_SOURCES})
-            set_source_files_properties(${_src} PROPERTIES
-                COMPILE_FLAGS "-fsycl")
-        endforeach()
-    endif()
-
-    # sycl.lib for SYCL runtime symbols
-    if(SYCL_LIBRARY_DIR)
-        target_link_directories(whisper_xpu_core PRIVATE ${SYCL_LIBRARY_DIR})
-    endif()
-    target_link_libraries(whisper_xpu_core PRIVATE sycl)
-endif()
+# ── Main core library (MSVC) ──
+add_library(whisper_xpu_core STATIC engine.cpp)
 
 target_include_directories(whisper_xpu_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -48,6 +14,36 @@ target_include_directories(whisper_xpu_core PRIVATE
 target_link_libraries(whisper_xpu_core PUBLIC
     whisper
 )
+
+# ── SYCL sub-library (Intel C++ Compiler + -fsycl) ──
+if(HAVE_SYCL)
+    file(GLOB_RECURSE SYCL_SOURCES sycl_src/*.cpp)
+    add_library(whisper_xpu_core_sycl STATIC ${SYCL_SOURCES})
+
+    if(WIN32 AND CMAKE_GENERATOR MATCHES "Visual Studio")
+        if(DEFINED ENV{DNNL_INTEL_TOOLSET})
+            set_target_properties(whisper_xpu_core_sycl PROPERTIES
+                VS_PLATFORM_TOOLSET "$ENV{DNNL_INTEL_TOOLSET}")
+        else()
+            set_target_properties(whisper_xpu_core_sycl PROPERTIES
+                VS_PLATFORM_TOOLSET "Intel C++ Compiler 2025")
+        endif()
+    endif()
+
+    target_compile_options(whisper_xpu_core_sycl PRIVATE -fsycl)
+    target_include_directories(whisper_xpu_core_sycl PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/sycl_src
+        ${SYCL_INCLUDE_DIR})
+    target_compile_definitions(whisper_xpu_core_sycl PRIVATE WHISPER_XPU_HAS_SYCL)
+
+    if(SYCL_LIBRARY_DIR)
+        target_link_directories(whisper_xpu_core_sycl PRIVATE ${SYCL_LIBRARY_DIR})
+    endif()
+    target_link_libraries(whisper_xpu_core_sycl PUBLIC sycl)
+
+    target_link_libraries(whisper_xpu_core PRIVATE whisper_xpu_core_sycl)
+endif()
 
 if(WIN32)
     target_link_libraries(whisper_xpu_core PRIVATE winmm)
