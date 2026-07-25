@@ -7,6 +7,7 @@ add_executable(whisper_xpu_app WIN32
 target_include_directories(whisper_xpu_app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/third_party/whisper.cpp/include
+    ${CMAKE_SOURCE_DIR}/whisper-xpu-core/sycl_src
 )
 
 target_include_directories(whisper_xpu_app PRIVATE
@@ -15,7 +16,7 @@ target_include_directories(whisper_xpu_app PRIVATE
 
 target_link_libraries(whisper_xpu_app PRIVATE
     whisper_xpu_core
-    wx::core          # wxWidgets GUI library (depends on wx::base)
+    wx::core
     portaudio
 )
 
