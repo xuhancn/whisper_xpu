@@ -1,4 +1,3 @@
-# Google Test
 set(GTEST_ROOT "${CMAKE_SOURCE_DIR}/third_party/gtest")
 if(NOT TARGET GTest::gtest)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
@@ -6,4 +5,6 @@ if(NOT TARGET GTest::gtest)
 endif()
 
 add_subdirectory(sycl_device_detect)
+add_subdirectory(merge_segments)
+add_subdirectory(bench_vad)
 enable_testing()
