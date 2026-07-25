@@ -18,27 +18,15 @@
 #   DNNLROOT            - Root directory of the oneDNN installation
 
 # ── Guard against double processing ──
-# This module is both included from the root CMakeLists.txt and found
-# via find_package(DNNL) inside ggml-sycl's cmake. Skip if the target
-# already exists (within a single configure run).
-# NOTE: we check TARGET not DNNL_FOUND because the cache variable
-# persists across re-configures but targets do not.
 if(TARGET DNNL::dnnl)
     return()
 endif()
 
-# ── Option: static or dynamic linking ──
 option(ONEDNN_STATIC "Link oneDNN as static library (build from source)" ON)
 
-# ── Record the CMAKE_MODULE_PATH as it was when this file first runs ──
-# The parent scope (root CMakeLists.txt) PREPENDs our cmake/ dir to
-# CMAKE_MODULE_PATH. Capture it so ggml-sycl's find_package(DNNL) still
-# resolves to this same module.
 if(ONEDNN_STATIC)
     # ═══════════════════════════════════════════════════════════════
     #  MODE 1: Static linking — build oneDNN from source
-    #  Approach matches PyTorch's FindMKLDNN.cmake:
-    #  https://github.com/pytorch/pytorch/blob/0cfa492631cca99c2aa4161ec67035fcda976869/cmake/Modules/FindMKLDNN.cmake
     # ═══════════════════════════════════════════════════════════════
     include(ExternalProject)
 
@@ -53,7 +41,7 @@ if(ONEDNN_STATIC)
 
     message(STATUS "oneDNN: building from source (static) at ${ONEDNN_SRC_DIR}")
 
-    # ── Parallelism (matches PyTorch) ──
+    # ── Parallelism ──
     include(ProcessorCount)
     ProcessorCount(_proc_cnt)
     if(DEFINED ENV{MAX_JOBS} AND "$ENV{MAX_JOBS}" LESS_EQUAL ${_proc_cnt})
@@ -72,23 +60,31 @@ if(ONEDNN_STATIC)
     # ── Compiler selection ──
     if(WIN32)
         # With Visual Studio generator, CMAKE_CXX_COMPILER is ignored;
-        # the compiler is selected via platform toolset.  PyTorch's
-        # FindMKLDNN.cmake sets -DCMAKE_CXX_COMPILER=icx which works on
-        # Linux (Ninja/Make) but NOT on Windows (VS).  Dynamically detect
-        # the latest installed Intel C++ toolset from the VS installation.
+        # the compiler is selected via platform toolset.  Dynamically
+        # detect the latest installed Intel C++ toolset from the VS
+        # installation without hardcoding versions or paths.
         set(_dnnl_cxx_driver "icx")
         set(_dnnl_host_compiler "DEFAULT")
         set(DNNL_LIB_NAME "dnnl.lib")
-        set(_vs_toolset_dir
-            "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/MSBuild/Microsoft/VC/v170/Platforms/x64/PlatformToolsets")
         set(_intel_toolset "")
-        file(GLOB _toolsets RELATIVE "${_vs_toolset_dir}" "${_vs_toolset_dir}/Intel*")
-        list(SORT _toolsets)
-        foreach(_ts IN LISTS _toolsets)
-            if(_ts MATCHES "Intel C\\+\\+ Compiler")
-                set(_intel_toolset "${_ts}")
-            endif()
-        endforeach()
+        if(CMAKE_GENERATOR_INSTANCE)
+            file(GLOB _vs_platform_dirs
+                "${CMAKE_GENERATOR_INSTANCE}/MSBuild/Microsoft/VC/*/Platforms/x64/PlatformToolsets")
+            list(SORT _vs_platform_dirs)
+            foreach(_pd IN LISTS _vs_platform_dirs)
+                file(GLOB _toolsets RELATIVE "${_pd}" "${_pd}/Intel*")
+                list(SORT _toolsets)
+                foreach(_ts IN LISTS _toolsets)
+                    if(_ts MATCHES "Intel C\\+\\+ Compiler")
+                        set(_intel_toolset "${_ts}")
+                        break()
+                    endif()
+                endforeach()
+                if(_intel_toolset)
+                    break()
+                endif()
+            endforeach()
+        endif()
         if(_intel_toolset)
             message(STATUS "oneDNN: using VS toolset '${_intel_toolset}'")
         else()
@@ -142,9 +138,8 @@ if(ONEDNN_STATIC)
     file(MAKE_DIRECTORY "${ONEDNN_BINARY_DIR}/include")
 
     # ── Import the static library ──
-    # PyTorch: ${BINARY_DIR}/src/dnnl.lib on Linux.
     # With VS multi-config generator + --config Release output goes to
-    # src/Release/ on Windows.
+    # src/Release/. On Linux generators output goes directly to src/.
     if(WIN32)
         set(_lib_dir "${ONEDNN_BINARY_DIR}/src/Release")
     else()
@@ -161,7 +156,7 @@ if(ONEDNN_STATIC)
     add_dependencies(DNNL::dnnl oneDNN_build)
     set(DNNL_FOUND TRUE)
     message(STATUS "Found oneDNN: static build (DNNL::dnnl)")
-    message(STATUS "Found oneDNN: library at ${ONEDNN_BINARY_DIR}/src/${DNNL_LIB_NAME}")
+    message(STATUS "Found oneDNN: library at ${_lib_dir}/${DNNL_LIB_NAME}")
 
 else()
     # ═══════════════════════════════════════════════════════════════
@@ -174,7 +169,6 @@ else()
         set(DNNLROOT $ENV{DNNLROOT})
         message(STATUS "DNNLROOT from environment: ${DNNLROOT}")
     else()
-        # Scan common oneAPI installation paths on Windows
         if(CMAKE_SYSTEM_NAME MATCHES "Windows")
             foreach(_version "latest" "2025.3" "2025.2" "2025.1" "2024.2" "2024.1")
                 set(_candidate "C:/Program Files (x86)/Intel/oneAPI/dnnl/${_version}")
@@ -201,8 +195,6 @@ else()
         set(DNNL_FOUND FALSE)
         message(STATUS "oneDNN not found. SYCL backend will build without oneDNN acceleration.")
     else()
-        # The oneAPI dnnl-config.cmake requires OpenCL headers/libs (for SYCL runtime).
-        # Provide paths from the oneAPI compiler installation.
         if(CMAKE_SYSTEM_NAME MATCHES "Windows")
             set(_ocl_root "C:/Program Files (x86)/Intel/oneAPI/compiler/latest")
             if(EXISTS "${_ocl_root}/include/CL/opencl.h")
@@ -212,7 +204,6 @@ else()
             endif()
         endif()
 
-        # Delegate to the oneAPI-provided dnnl-config.cmake.
         set(DNNL_DIR "${DNNLROOT}/lib/cmake/dnnl")
         if(EXISTS "${DNNL_DIR}/dnnl-config.cmake")
             include("${DNNL_DIR}/dnnl-config.cmake")
@@ -239,8 +230,5 @@ else()
     endif()
 endif()
 
-# ── Guard against double-processing by find_package(DNNL) later ──
-# Export the DNNL_FOUND decision into the cache so that subsequent
-# find_package(DNNL) calls from ggml-sycl see it.
 set(DNNL_FOUND "${DNNL_FOUND}" CACHE BOOL "oneDNN library found" FORCE)
 mark_as_advanced(DNNL_FOUND)
