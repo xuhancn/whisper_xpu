@@ -12,6 +12,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 
+# Multi-process compilation for MSVC targets only.
+# /MP compiles multiple source files in parallel within a single project.
+# Intel C++ targets (SYCL) are excluded — icx-cl rejects /MP with -fsycl.
+add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/MP>)
+
 # ── SYCL toolchain detection ──
 # FindSYCLToolkit locates the Intel oneAPI installation (compiler, headers, libs).
 include(cmake/FindSYCLToolkit.cmake)
@@ -29,6 +34,10 @@ if(WHISPER_XPU_USE_GPU AND SYCL_FOUND)
     message(STATUS "Intel oneAPI SYCL toolkit detected. GPU acceleration enabled.")
 
     # ── OneDNN detection (for SYCL backend acceleration) ──
+    # ONEDNN_STATIC controls linking mode:
+    #   ON  (default) — build oneDNN from source as static lib (no dnnl.dll needed)
+    #   OFF           — use pre-built oneDNN DLL from oneAPI installation
+    option(ONEDNN_STATIC "Link oneDNN as static library (build from source)" ON)
     include(cmake/FindDNNL.cmake)
 else()
     set(HAVE_SYCL FALSE)
