@@ -28,14 +28,21 @@ if(EXISTS "${APP}")
     file(COPY "${APP}" DESTINATION "${REL_DIR}/bin")
 endif()
 
-# ── SYCL runtime DLL (sycl8.dll or sycl*.dll in compiler bin dir) ──
-get_filename_component(_sycl_root "@SYCL_LIBRARY_DIR@/.." ABSOLUTE)
-file(GLOB _sycl_dlls "${_sycl_root}/bin/sycl*.dll")
-foreach(_dll ${_sycl_dlls})
-    file(COPY "${_dll}" DESTINATION "${REL_DIR}/bin")
+# ── Intel oneAPI runtime DLLs ──
+get_filename_component(_rt_root "@SYCL_LIBRARY_DIR@/.." ABSOLUTE)
+# SYCL runtime
+file(GLOB _rt_dlls "${_rt_root}/bin/sycl*.dll")
+# Intel compiler math library (needed by icx-compiled code)
+list(APPEND _rt_dlls "${_rt_root}/bin/svml_dispmd.dll")
+# Intel OpenMP runtime
+list(APPEND _rt_dlls "${_rt_root}/bin/libiomp5md.dll")
+foreach(_dll ${_rt_dlls})
+    if(EXISTS "${_dll}")
+        file(COPY "${_dll}" DESTINATION "${REL_DIR}/bin")
+    endif()
 endforeach()
-if(NOT _sycl_dlls)
-    message(STATUS "SYCL runtime DLL not found (expected in ${_sycl_root}/bin/)")
+if(NOT EXISTS "${_rt_root}/bin/sycl8.dll")
+    message(STATUS "SYCL runtime DLL not found in ${_rt_root}/bin/")
 endif()
 
 # ── oneDNN DLL (only when ONEDNN_STATIC=OFF) ──
