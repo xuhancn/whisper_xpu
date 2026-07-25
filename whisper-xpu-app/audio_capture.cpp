@@ -4,11 +4,31 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <sstream>
+
+// ---------------------------------------------------------------------------
+// AudioDeviceInfo
+// ---------------------------------------------------------------------------
+
+std::string AudioDeviceInfo::to_string() const {
+    std::ostringstream oss;
+    oss << name;
+    if (max_channels > 0)
+        oss << " (" << max_channels << "ch, " << (int)sample_rate << " Hz)";
+    if (is_default)
+        oss << " [default]";
+    return oss.str();
+}
+
+// ---------------------------------------------------------------------------
+// AudioCapture::Impl
+// ---------------------------------------------------------------------------
 
 struct AudioCapture::Impl {
     PaStream* stream = nullptr;
     bool active = false;
     int sampleRate = 16000;
+    int deviceId = kMicDefault;
     AudioCaptureCallback callback;
 
     static int paCallback(const void* input, void* output,
@@ -41,42 +61,67 @@ AudioCapture::~AudioCapture() {
     Pa_Terminate();
 }
 
-std::vector<std::string> AudioCapture::enumerate_devices() {
-    std::vector<std::string> devices;
+// ---------------------------------------------------------------------------
+// Enumerate input devices
+// ---------------------------------------------------------------------------
 
-    // Initialize if not already done (static function may be called standalone)
+std::vector<AudioDeviceInfo> AudioCapture::enumerate_devices() {
+    std::vector<AudioDeviceInfo> list;
+
     PaError err = Pa_Initialize();
     bool need_term = (err == paNoError);
 
     int numDevices = Pa_GetDeviceCount();
     if (numDevices < 0) {
         if (need_term) Pa_Terminate();
-        return devices;
+        return list;
     }
+
+    int default_dev = Pa_GetDefaultInputDevice();
 
     for (int i = 0; i < numDevices; ++i) {
         const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
-        if (info && info->maxInputChannels > 0) {
-            char buf[256];
-            snprintf(buf, sizeof(buf), "[%d] %s (in: %d, sr: %.0f)",
-                     i, info->name,
-                     info->maxInputChannels,
-                     info->defaultSampleRate);
-            devices.push_back(buf);
-        }
+        if (!info || info->maxInputChannels < 1)
+            continue;
+
+        AudioDeviceInfo dev;
+        dev.index        = i;
+        dev.name         = info->name;
+        dev.max_channels = info->maxInputChannels;
+        dev.sample_rate  = info->defaultSampleRate;
+        dev.is_default   = (i == default_dev);
+        list.push_back(dev);
     }
 
     if (need_term) Pa_Terminate();
-    return devices;
+    return list;
 }
 
-bool AudioCapture::start(int sample_rate, int frames_per_buffer) {
+// ---------------------------------------------------------------------------
+// Start / Stop
+// ---------------------------------------------------------------------------
+
+bool AudioCapture::start(int device_id, int sample_rate, int frames_per_buffer) {
     if (pimpl_->active) return true;
 
-    // Use the default input device
-    int device = Pa_GetDefaultInputDevice();
-    if (device == paNoDevice) {
-        fprintf(stderr, "[audio] No default input device found\n");
+    // kMicDefault = use system default; concrete index = use that device
+    int device = device_id;
+    if (device == kMicDefault) {
+        device = Pa_GetDefaultInputDevice();
+        if (device == paNoDevice) {
+            fprintf(stderr, "[audio] No default input device found\n");
+            return false;
+        }
+    }
+
+    // Validate device exists and has input channels
+    const PaDeviceInfo* devInfo = Pa_GetDeviceInfo(device);
+    if (!devInfo) {
+        fprintf(stderr, "[audio] Device %d not found\n", device);
+        return false;
+    }
+    if (devInfo->maxInputChannels < 1) {
+        fprintf(stderr, "[audio] Device %d has no input channels\n", device);
         return false;
     }
 
@@ -85,19 +130,13 @@ bool AudioCapture::start(int sample_rate, int frames_per_buffer) {
     inputParams.device = device;
     inputParams.channelCount = 1;
     inputParams.sampleFormat = paFloat32;
-    inputParams.suggestedLatency = Pa_GetDeviceInfo(device)->defaultLowInputLatency;
+    inputParams.suggestedLatency = devInfo->defaultLowInputLatency;
     inputParams.hostApiSpecificStreamInfo = nullptr;
 
     PaError err = Pa_OpenStream(
-        &pimpl_->stream,
-        &inputParams,
-        nullptr,                // no output
-        sample_rate,
-        frames_per_buffer,
-        paClipOff,              // don't clip out-of-range samples
-        Impl::paCallback,
-        pimpl_.get()
-    );
+        &pimpl_->stream, &inputParams, nullptr,
+        sample_rate, frames_per_buffer, paClipOff,
+        Impl::paCallback, pimpl_.get());
 
     if (err != paNoError) {
         fprintf(stderr, "[audio] OpenStream error: %s\n", Pa_GetErrorText(err));
@@ -113,20 +152,20 @@ bool AudioCapture::start(int sample_rate, int frames_per_buffer) {
     }
 
     pimpl_->sampleRate = sample_rate;
-    pimpl_->active = true;
-    fprintf(stderr, "[audio] Capture started (device %d, %d Hz)\n", device, sample_rate);
+    pimpl_->deviceId   = device;
+    pimpl_->active     = true;
+    fprintf(stderr, "[audio] Capture started (device %d: %s, %d Hz)\n",
+            device, devInfo->name, sample_rate);
     return true;
 }
 
 void AudioCapture::stop() {
     if (!pimpl_->active) return;
-
     if (pimpl_->stream) {
         Pa_StopStream(pimpl_->stream);
         Pa_CloseStream(pimpl_->stream);
         pimpl_->stream = nullptr;
     }
-
     pimpl_->active = false;
     fprintf(stderr, "[audio] Capture stopped\n");
 }
@@ -135,10 +174,6 @@ void AudioCapture::set_callback(AudioCaptureCallback cb) {
     pimpl_->callback = std::move(cb);
 }
 
-bool AudioCapture::is_active() const {
-    return pimpl_->active;
-}
-
-int AudioCapture::sample_rate() const {
-    return pimpl_->sampleRate;
-}
+bool AudioCapture::is_active() const { return pimpl_->active; }
+int AudioCapture::sample_rate() const { return pimpl_->sampleRate; }
+int AudioCapture::device_id() const { return pimpl_->deviceId; }
