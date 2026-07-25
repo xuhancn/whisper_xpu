@@ -1,5 +1,2 @@
-# Device detection unit tests (non-SYCL + SYCL)
-add_subdirectory(device_detect)
-
-# Enable CTest
+add_subdirectory(sycl_device_detect)
 enable_testing()
