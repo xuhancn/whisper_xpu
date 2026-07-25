@@ -1,7 +1,4 @@
-# Release packaging script
-# Called from: cmake -P release.cmake
-# @CMAKE_BINARY_DIR@, @CMAKE_SOURCE_DIR@ etc. are substituted by configure_file()
-
+# Release packaging script — cmake -P release.cmake
 set(SRC_DIR "@CMAKE_SOURCE_DIR@")
 set(BIN_DIR "@CMAKE_BINARY_DIR@")
 set(REL_DIR "${BIN_DIR}/release")
@@ -13,43 +10,46 @@ endif()
 file(REMOVE_RECURSE "${REL_DIR}")
 file(MAKE_DIRECTORY "${REL_DIR}/include" "${REL_DIR}/lib" "${REL_DIR}/bin")
 
-# Copy public headers
+# ── Headers ──
 file(COPY "${SRC_DIR}/whisper-xpu-core/whisper_xpu_core.h" DESTINATION "${REL_DIR}/include")
 file(COPY "${SRC_DIR}/whisper-xpu-core/export.h"           DESTINATION "${REL_DIR}/include")
 
-# Copy merged library
-set(LIB_FILE "${BIN_DIR}/whisper-xpu-core/${CFG}/whisper_xpu_core.lib")
-if(EXISTS "${LIB_FILE}")
-    file(COPY "${LIB_FILE}" DESTINATION "${REL_DIR}/lib")
+# ── Library ──
+set(LIB "${BIN_DIR}/whisper-xpu-core/${CFG}/whisper_xpu_core.lib")
+if(EXISTS "${LIB}")
+    file(COPY "${LIB}" DESTINATION "${REL_DIR}/lib")
 else()
-    message(FATAL_ERROR "whisper_xpu_core.lib not found at ${LIB_FILE}")
+    message(FATAL_ERROR "whisper_xpu_core.lib not found")
 endif()
 
-# Copy SYCL runtime DLL if present
-if("@HAVE_SYCL@" STREQUAL "TRUE")
-    set(SYCL_DLL "@SYCL_LIBRARY_DIR@/sycl.dll")
-    if(EXISTS "${SYCL_DLL}")
-        file(COPY "${SYCL_DLL}" DESTINATION "${REL_DIR}/bin")
-    else()
-        message(WARNING "sycl.dll not found at ${SYCL_DLL}")
+# ── App ──
+set(APP "${BIN_DIR}/whisper-xpu-app/${CFG}/whisper_xpu_app.exe")
+if(EXISTS "${APP}")
+    file(COPY "${APP}" DESTINATION "${REL_DIR}/bin")
+    message(STATUS "App: ${APP}")
+endif()
+
+# ── Runtime DLLs ──
+# SYCL runtime (always needed in GPU build)
+set(SYCL_DLL "@SYCL_LIBRARY_DIR@/sycl.dll")
+if(EXISTS "${SYCL_DLL}")
+    file(COPY "${SYCL_DLL}" DESTINATION "${REL_DIR}/bin")
+endif()
+
+# oneDNN DLL (only when ONEDNN_STATIC=OFF)
+if("@ONEDNN_STATIC@" STREQUAL "OFF" AND "@DNNL_FOUND@" STREQUAL "TRUE")
+    get_target_property(DLL DNNL::dnnl IMPORTED_LOCATION_RELEASE)
+    if(DLL AND EXISTS "${DLL}")
+        file(COPY "${DLL}" DESTINATION "${REL_DIR}/bin")
     endif()
 endif()
 
-# Copy dnnl.dll if dynamic linking (ONEDNN_STATIC=OFF)
-if("@DNNL_FOUND@" STREQUAL "TRUE")
-    if("@ONEDNN_STATIC@" STREQUAL "OFF")
-        get_target_property(DLL_LOC DNNL::dnnl IMPORTED_LOCATION_RELEASE)
-        if(DLL_LOC AND EXISTS "${DLL_LOC}")
-            file(COPY "${DLL_LOC}" DESTINATION "${REL_DIR}/bin")
-        endif()
-    endif()
-endif()
-
-# Summary
-file(GLOB_RECURSE REL_FILES "${REL_DIR}/*")
-list(LENGTH REL_FILES N)
-message(STATUS "Release package created: ${REL_DIR}")
-foreach(F ${REL_FILES})
-    file(RELATIVE_PATH RF "${REL_DIR}" "${F}")
-    message(STATUS "  ${RF}")
+# ── Summary ──
+file(GLOB_RECURSE FILES "${REL_DIR}/*")
+message(STATUS "Release: ${REL_DIR}")
+foreach(F ${FILES})
+    file(RELATIVE_PATH R "${REL_DIR}" "${F}")
+    get_filename_component(SZ "${F}" SIZE)
+    math(EXPR SZ "${SZ} / 1024")
+    message(STATUS "  ${R} (${SZ} KB)")
 endforeach()
