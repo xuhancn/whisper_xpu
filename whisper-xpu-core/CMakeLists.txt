@@ -17,6 +17,8 @@ if(HAVE_SYCL)
             set_source_files_properties(device_detect.cpp PROPERTIES
                 VS_TOOLSET_OVERRIDE "Intel C++ Compiler 2025")
         endif()
+        set_source_files_properties(device_detect.cpp PROPERTIES
+            COMPILE_FLAGS "-fsycl")
     endif()
 endif()
 
