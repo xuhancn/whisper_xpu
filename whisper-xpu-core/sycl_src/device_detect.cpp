@@ -59,7 +59,7 @@ std::vector<DeviceInfo> get_available_devices() {
                 list.push_back(inf); ++idx;
             }
     } catch (const std::exception &e) {
-        DeviceInfo e; e.index = -2; e.device_class = DeviceClass::Unknown; e.name = "SYCL error: " + std::string(e.what()); list.push_back(e);
+        DeviceInfo err; err.index = -2; err.device_class = DeviceClass::Unknown; err.name = "SYCL error: " + std::string(e.what()); list.push_back(err);
     }
 #else
     { DeviceInfo s; s.index = -2; s.device_class = DeviceClass::Unknown; s.name = "SYCL not compiled"; list.push_back(s); }
