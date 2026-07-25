@@ -1,77 +1,33 @@
+#include <gtest/gtest.h>
 #include "device_detect.h"
-#include <cstdio>
-#include <cstring>
-#include <cstdlib>
-#include <cassert>
-#include <sstream>
 
-// ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
-
-static int g_tests_passed = 0;
-static int g_tests_failed = 0;
-
-#define TEST(name)                                                       \
-    do {                                                                 \
-        printf("  TEST: %s ... ", name);                                 \
-        fflush(stdout);                                                  \
-    } while (0)
-
-#define PASS()                                                           \
-    do {                                                                 \
-        printf("PASSED\n");                                              \
-        g_tests_passed++;                                                \
-    } while (0)
-
-#define FAIL(msg)                                                        \
-    do {                                                                 \
-        printf("FAILED: %s\n", msg);                                     \
-        g_tests_failed++;                                                \
-    } while (0)
-
-#define ASSERT(cond, msg)                                                \
-    do {                                                                 \
-        if (!(cond)) { FAIL(msg); return; }                              \
-    } while (0)
-
-// ---------------------------------------------------------------------------
+// ============================================================================
 // Constants
-// ---------------------------------------------------------------------------
+// ============================================================================
 
-static void test_constants() {
-    TEST("kDeviceCPU == -1");
-    ASSERT(kDeviceCPU == -1, "expected -1");
-    PASS();
-
-    TEST("kDeviceAuto == -2");
-    ASSERT(kDeviceAuto == -2, "expected -2");
-    PASS();
+TEST(Constants, kDeviceCPU) {
+    EXPECT_EQ(kDeviceCPU, -1);
 }
 
-// ---------------------------------------------------------------------------
+TEST(Constants, kDeviceAuto) {
+    EXPECT_EQ(kDeviceAuto, -2);
+}
+
+// ============================================================================
 // DeviceClass
-// ---------------------------------------------------------------------------
+// ============================================================================
 
-static void test_device_class() {
-    TEST("DeviceClass::CPU != DeviceClass::GPU_Discrete");
-    ASSERT(DeviceClass::CPU != DeviceClass::GPU_Discrete, "expected different values");
-    PASS();
-
-    TEST("DeviceClass::GPU_Integrated != DeviceClass::GPU_Discrete");
-    ASSERT(DeviceClass::GPU_Integrated != DeviceClass::GPU_Discrete, "expected different values");
-    PASS();
-
-    TEST("DeviceClass::GPU_Integrated != DeviceClass::Unknown");
-    ASSERT(DeviceClass::GPU_Integrated != DeviceClass::Unknown, "expected different values");
-    PASS();
+TEST(DeviceClass, ValuesAreDistinct) {
+    EXPECT_NE(DeviceClass::CPU, DeviceClass::GPU_Discrete);
+    EXPECT_NE(DeviceClass::GPU_Integrated, DeviceClass::GPU_Discrete);
+    EXPECT_NE(DeviceClass::GPU_Integrated, DeviceClass::Unknown);
 }
 
-// ---------------------------------------------------------------------------
+// ============================================================================
 // DeviceInfo::to_string()
-// ---------------------------------------------------------------------------
+// ============================================================================
 
-static void test_device_info_to_string_cpu() {
+TEST(DeviceInfoToString, CPU) {
     DeviceInfo cpu;
     cpu.index         = kDeviceCPU;
     cpu.device_class  = DeviceClass::CPU;
@@ -82,152 +38,95 @@ static void test_device_info_to_string_cpu() {
     cpu.free_mem      = 0;
 
     std::string s = cpu.to_string();
-    TEST("CPU to_string contains [CPU]");
-    ASSERT(s.find("[CPU]") != std::string::npos, "expected [CPU] tag");
-    PASS();
-
-    TEST("CPU to_string does not contain VRAM");
-    ASSERT(s.find("VRAM") == std::string::npos, "CPU should have no VRAM");
-    PASS();
+    EXPECT_NE(s.find("[CPU]"), std::string::npos) << "should contain [CPU] tag";
+    EXPECT_EQ(s.find("VRAM"), std::string::npos) << "CPU should have no VRAM";
 }
 
-static void test_device_info_to_string_gpu() {
+TEST(DeviceInfoToString, dGPU) {
     DeviceInfo gpu;
     gpu.index         = 0;
     gpu.device_class  = DeviceClass::GPU_Discrete;
     gpu.name          = "Intel(R) Arc(TM) A770 Graphics";
     gpu.vendor        = "Intel(R) Corporation";
     gpu.compute_units = 512;
-    gpu.total_mem     = 17163091968ULL;   // ~16 GB
-    gpu.free_mem      = 8581545984ULL;    // ~8 GB
+    gpu.total_mem     = 17163091968ULL;
+    gpu.free_mem      = 8581545984ULL;
 
     std::string s = gpu.to_string();
-    TEST("dGPU to_string contains [dGPU]");
-    ASSERT(s.find("[dGPU]") != std::string::npos, "expected [dGPU] tag");
-    PASS();
-
-    TEST("dGPU to_string contains VRAM in MB");
-    ASSERT(s.find("VRAM") != std::string::npos, "expected VRAM");
-    PASS();
-
-    TEST("dGPU to_string contains free mem");
-    ASSERT(s.find("free") != std::string::npos, "expected free memory");
-    PASS();
-
-    TEST("dGPU to_string contains CU count");
-    ASSERT(s.find("512 CUs") != std::string::npos, "expected compute units");
-    PASS();
+    EXPECT_NE(s.find("[dGPU]"), std::string::npos) << "should contain [dGPU] tag";
+    EXPECT_NE(s.find("VRAM"), std::string::npos) << "should contain VRAM";
+    EXPECT_NE(s.find("free"), std::string::npos) << "should contain free memory";
+    EXPECT_NE(s.find("512 CUs"), std::string::npos) << "should contain compute units";
 }
 
-static void test_device_info_to_string_igpu() {
+TEST(DeviceInfoToString, iGPU) {
     DeviceInfo igpu;
     igpu.index         = 1;
     igpu.device_class  = DeviceClass::GPU_Integrated;
     igpu.name          = "Intel(R) UHD Graphics";
     igpu.vendor        = "Intel(R) Corporation";
     igpu.compute_units = 96;
-    igpu.total_mem     = 34359738368ULL;  // 32 GB shared
-    igpu.free_mem      = 0;               // free not available
+    igpu.total_mem     = 34359738368ULL;
+    igpu.free_mem      = 0;
 
     std::string s = igpu.to_string();
-    TEST("iGPU to_string contains [iGPU]");
-    ASSERT(s.find("[iGPU]") != std::string::npos, "expected [iGPU] tag");
-    PASS();
-
-    TEST("iGPU to_string mentions UHD Graphics");
-    ASSERT(s.find("UHD Graphics") != std::string::npos, "expected device name");
-    PASS();
-
-    TEST("iGPU to_string has vendor");
-    ASSERT(s.find("Intel") != std::string::npos, "expected vendor name");
-    PASS();
+    EXPECT_NE(s.find("[iGPU]"), std::string::npos) << "should contain [iGPU] tag";
+    EXPECT_NE(s.find("UHD Graphics"), std::string::npos) << "should contain device name";
+    EXPECT_NE(s.find("Intel"), std::string::npos) << "should contain vendor";
 }
 
-// ---------------------------------------------------------------------------
-// get_device_info() fallback
-// ---------------------------------------------------------------------------
+TEST(DeviceInfoToString, UnknownClass) {
+    DeviceInfo unk;
+    unk.index         = 3;
+    unk.device_class  = DeviceClass::Unknown;
+    unk.name          = "Some Device";
+    unk.vendor        = "Some Vendor";
+    unk.compute_units = 0;
+    unk.total_mem     = 0;
+    unk.free_mem      = 0;
 
-static void test_get_device_info_cpu_fallback() {
-    // When no devices with the given index exist, should return CPU.
+    std::string s = unk.to_string();
+    EXPECT_NE(s.find("[Unknown]"), std::string::npos) << "should contain [Unknown] tag";
+}
+
+// ============================================================================
+// get_device_info()
+// ============================================================================
+
+TEST(GetDeviceInfo, FallbackToCPU) {
     auto info = get_device_info(999);
-    TEST("get_device_info(999) returns CPU");
-    ASSERT(info.index == kDeviceCPU, "expected CPU fallback");
-    PASS();
+    EXPECT_EQ(info.index, kDeviceCPU);
+    EXPECT_EQ(info.device_class, DeviceClass::CPU);
 }
 
-// ---------------------------------------------------------------------------
-// SYCL-dependent tests (only run when WHISPER_XPU_HAS_SYCL is defined)
-// ---------------------------------------------------------------------------
+TEST(GetDeviceInfo, ReturnsCPUEntry) {
+    auto info = get_device_info(kDeviceCPU);
+    EXPECT_EQ(info.index, kDeviceCPU);
+    EXPECT_EQ(info.device_class, DeviceClass::CPU);
+}
+
+// ============================================================================
+// SYCL-dependent (only compiled when WHISPER_XPU_HAS_SYCL is defined)
+// ============================================================================
 
 #ifdef WHISPER_XPU_HAS_SYCL
-static void test_has_intel_gpu() {
-    TEST("has_intel_gpu() runs without exception");
-    try {
+TEST(SYCL, HasIntelGPU) {
+    EXPECT_NO_THROW({
         bool has = has_intel_gpu();
-        printf(" (result: %s) ", has ? "true" : "false");
-        PASS();
-    } catch (const std::exception& e) {
-        FAIL(e.what());
-    }
+        EXPECT_TRUE(has) << "expected at least one Intel GPU";
+    });
 }
 
-static void test_get_available_devices() {
-    TEST("get_available_devices() returns non-empty list");
+TEST(SYCL, GetAvailableDevices) {
     auto devices = get_available_devices();
-    ASSERT(!devices.empty(), "device list should not be empty");
-    PASS();
+    ASSERT_FALSE(devices.empty()) << "device list should not be empty";
+    EXPECT_EQ(devices[0].index, kDeviceCPU);
+    EXPECT_EQ(devices[0].device_class, DeviceClass::CPU);
 
-    TEST("get_available_devices() first entry is always CPU");
-    ASSERT(devices[0].index == kDeviceCPU, "first entry must be CPU");
-    ASSERT(devices[0].device_class == DeviceClass::CPU, "first entry must be CPU class");
-    PASS();
-
-    TEST("get_available_devices() GPU entries have positive index");
     for (const auto& d : devices) {
         if (d.device_class != DeviceClass::CPU) {
-            ASSERT(d.index >= 0, "GPU index must be >= 0");
+            EXPECT_GE(d.index, 0) << "GPU index must be >= 0";
         }
     }
-    PASS();
-}
-#else
-static void test_sycl_not_available() {
-    TEST("WHISPER_XPU_HAS_SYCL not defined — SYCL tests skipped");
-    PASS();
 }
 #endif
-
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
-
-int main() {
-    printf("=== whisper_xpu device_detect tests ===\n\n");
-
-    printf("--- Constants ---\n");
-    test_constants();
-
-    printf("\n--- DeviceClass ---\n");
-    test_device_class();
-
-    printf("\n--- DeviceInfo::to_string() ---\n");
-    test_device_info_to_string_cpu();
-    test_device_info_to_string_gpu();
-    test_device_info_to_string_igpu();
-
-    printf("\n--- get_device_info() ---\n");
-    test_get_device_info_cpu_fallback();
-
-    printf("\n--- SYCL-dependent ---\n");
-#ifdef WHISPER_XPU_HAS_SYCL
-    test_has_intel_gpu();
-    test_get_available_devices();
-#else
-    test_sycl_not_available();
-#endif
-
-    printf("\n=== Results: %d passed, %d failed ===\n",
-           g_tests_passed, g_tests_failed);
-
-    return g_tests_failed > 0 ? 1 : 0;
-}
