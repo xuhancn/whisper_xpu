@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "device_detect.h"
 
 #include "whisper.h"
 #include "ggml-sycl.h"
@@ -158,7 +159,7 @@ struct Engine::Impl {
     struct whisper_context* ctx = nullptr;
     bool gpu_initialized = false;
     std::string device_desc;
-    int device_id = -1;
+    int device_id = kDeviceCPU;
     int n_threads = 0;
 
     Impl() {

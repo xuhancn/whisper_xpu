@@ -2,13 +2,11 @@
 #include "app_frame.h"
 #include "device_detect.h"
 
-static constexpr int kDeviceAutoDetect = -2;
-
 class WhisperApp : public wxApp {
 public:
     virtual bool OnInit() override {
         wxString model_path;
-        int device_index = kDeviceAutoDetect;
+        int device_index = kDeviceAuto;
         bool user_set_device = false;
 
         for (int i = 1; i < argc; ++i) {
@@ -22,7 +20,7 @@ public:
                     user_set_device = true;
                 }
             } else if (arg == "--cpu") {
-                device_index = -1;
+                device_index = kDeviceCPU;
                 user_set_device = true;
             } else if (arg == "--list-devices") {
                 auto devices = whisper_xpu::get_available_devices();
@@ -43,7 +41,7 @@ public:
 
         if (!user_set_device) {
             auto devices = whisper_xpu::get_available_devices();
-            device_index = -1;
+            device_index = kDeviceCPU;
             for (const auto& d : devices) {
                 if (d.device_class == DeviceClass::GPU_Discrete) {
                     device_index = d.index;
