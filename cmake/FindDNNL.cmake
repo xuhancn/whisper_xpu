@@ -1,16 +1,3 @@
-# FindDNNL.cmake
-#
-# Locates Intel oneDNN library. Supports two modes controlled by ONEDNN_STATIC:
-#
-#   ONEDNN_STATIC=ON  (default)
-#     - Builds oneDNN from source (third_party/oneDNN) as a static library.
-#     - Requires DNNL_INTEL_TOOLSET env var on Windows (e.g. "Intel C++ Compiler 2025").
-#     - Produces DNNL::dnnl as a STATIC IMPORTED target.
-#
-#   ONEDNN_STATIC=OFF
-#     - Uses pre-built oneDNN DLL from DNNLROOT env var.
-#     - Delegates to oneAPI-provided dnnl-config.cmake (defines DNNL::dnnl SHARED).
-
 if(TARGET DNNL::dnnl)
     return()
 endif()
@@ -18,9 +5,6 @@ endif()
 option(ONEDNN_STATIC "Link oneDNN as static library (build from source)" ON)
 
 if(ONEDNN_STATIC)
-    # ═══════════════════════════════════════════════════════════
-    #  MODE 1: Static — build oneDNN from source
-    # ═══════════════════════════════════════════════════════════
     include(ExternalProject)
 
     set(ONEDNN_SRC_DIR "${CMAKE_SOURCE_DIR}/third_party/oneDNN")
@@ -34,7 +18,6 @@ if(ONEDNN_STATIC)
 
     message(STATUS "oneDNN: building from source (static) at ${ONEDNN_SRC_DIR}")
 
-    # ── Parallelism ──
     include(ProcessorCount)
     ProcessorCount(_proc_cnt)
     if(DEFINED ENV{MAX_JOBS} AND "$ENV{MAX_JOBS}" LESS_EQUAL ${_proc_cnt})
@@ -44,14 +27,9 @@ if(ONEDNN_STATIC)
     endif()
     unset(_proc_cnt)
 
-    # ── Build command ──
     set(_dnnl_build_cmd "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release --parallel ${_jobs})
 
-    # ── Compiler selection (all from environment) ──
     if(WIN32)
-        # VS generator ignores CMAKE_CXX_COMPILER; toolset must be set.
-        # The oneAPI setvars.bat registers an Intel toolset like
-        # "Intel C++ Compiler 2025".  Pass it via DNNL_INTEL_TOOLSET.
         set(DNNL_LIB_NAME "dnnl.lib")
         if(DEFINED ENV{DNNL_INTEL_TOOLSET})
             set(_intel_toolset "$ENV{DNNL_INTEL_TOOLSET}")
@@ -61,46 +39,56 @@ if(ONEDNN_STATIC)
                 "Run setvars.bat from oneAPI, then:\n"
                 "  set DNNL_INTEL_TOOLSET=Intel C++ Compiler 2025")
         endif()
-        set(_dnnl_toolset_arg
+        ExternalProject_Add(oneDNN_build
+            SOURCE_DIR      "${ONEDNN_SRC_DIR}"
+            PREFIX          "${ONEDNN_PREFIX}"
             CMAKE_GENERATOR         "${CMAKE_GENERATOR}"
             CMAKE_GENERATOR_PLATFORM "${CMAKE_GENERATOR_PLATFORM}"
             CMAKE_GENERATOR_TOOLSET  "${_intel_toolset}"
+            CMAKE_ARGS
+                -DDNNL_GPU_RUNTIME=SYCL
+                -DDNNL_CPU_RUNTIME=THREADPOOL
+                -DDNNL_BUILD_TESTS=OFF
+                -DDNNL_BUILD_EXAMPLES=OFF
+                -DONEDNN_BUILD_GRAPH=ON
+                -DDNNL_LIBRARY_TYPE=STATIC
+                -DDNNL_DPCPP_HOST_COMPILER=DEFAULT
+                -DDNNL_ENABLE_ITT_TASKS=OFF
+                -DDNNL_ENABLE_JIT_PROFILING=OFF
+                -DSYCL_FLAG_SUPPORTED=TRUE
+            BUILD_COMMAND ${_dnnl_build_cmd}
+            BUILD_BYPRODUCTS "<BINARY_DIR>/src/Release/${DNNL_LIB_NAME}"
+            INSTALL_COMMAND ""
         )
     else()
         set(DNNL_LIB_NAME "libdnnl.a")
-        set(_dnnl_toolset_arg
-            CMAKE_CXX_COMPILER "icpx"
-            CMAKE_C_COMPILER   "icpx"
+        ExternalProject_Add(oneDNN_build
+            SOURCE_DIR      "${ONEDNN_SRC_DIR}"
+            PREFIX          "${ONEDNN_PREFIX}"
+            CMAKE_ARGS
+                -DDNNL_GPU_RUNTIME=SYCL
+                -DDNNL_CPU_RUNTIME=THREADPOOL
+                -DDNNL_BUILD_TESTS=OFF
+                -DDNNL_BUILD_EXAMPLES=OFF
+                -DONEDNN_BUILD_GRAPH=ON
+                -DDNNL_LIBRARY_TYPE=STATIC
+                -DDNNL_DPCPP_HOST_COMPILER=g++
+                -DDNNL_ENABLE_ITT_TASKS=OFF
+                -DDNNL_ENABLE_JIT_PROFILING=OFF
+                -DSYCL_FLAG_SUPPORTED=TRUE
+            CMAKE_CACHE_ARGS
+                -DCMAKE_CXX_COMPILER:FILEPATH=icpx
+                -DCMAKE_C_COMPILER:FILEPATH=icx
+            BUILD_COMMAND ${_dnnl_build_cmd}
+            BUILD_BYPRODUCTS "<BINARY_DIR>/src/${DNNL_LIB_NAME}"
+            INSTALL_COMMAND ""
         )
     endif()
-
-    # ── oneDNN build ──
-    ExternalProject_Add(oneDNN_build
-        SOURCE_DIR      "${ONEDNN_SRC_DIR}"
-        PREFIX          "${ONEDNN_PREFIX}"
-        ${_dnnl_toolset_arg}
-        CMAKE_ARGS
-            -DCMAKE_CXX_COMPILER=icx
-            -DDNNL_GPU_RUNTIME=SYCL
-            -DDNNL_CPU_RUNTIME=THREADPOOL
-            -DDNNL_BUILD_TESTS=OFF
-            -DDNNL_BUILD_EXAMPLES=OFF
-            -DONEDNN_BUILD_GRAPH=ON
-            -DDNNL_LIBRARY_TYPE=STATIC
-            -DDNNL_DPCPP_HOST_COMPILER=DEFAULT
-            -DDNNL_ENABLE_ITT_TASKS=OFF
-            -DDNNL_ENABLE_JIT_PROFILING=OFF
-            -DSYCL_FLAG_SUPPORTED=TRUE
-        BUILD_COMMAND ${_dnnl_build_cmd}
-        BUILD_BYPRODUCTS "<BINARY_DIR>/src/Release/${DNNL_LIB_NAME}"
-        INSTALL_COMMAND ""
-    )
 
     ExternalProject_Get_Property(oneDNN_build SOURCE_DIR BINARY_DIR)
     set(ONEDNN_BINARY_DIR "${BINARY_DIR}")
     file(MAKE_DIRECTORY "${ONEDNN_BINARY_DIR}/include")
 
-    # ── Import the static library ──
     if(WIN32)
         set(_lib_dir "${ONEDNN_BINARY_DIR}/src/Release")
     else()
@@ -120,10 +108,6 @@ if(ONEDNN_STATIC)
     message(STATUS "Found oneDNN: library at ${_lib_dir}/${DNNL_LIB_NAME}")
 
 else()
-    # ═══════════════════════════════════════════════════════════
-    #  MODE 2: Dynamic — pre-built oneAPI DLL
-    # ═══════════════════════════════════════════════════════════
-
     set(DNNLROOT "")
     if(DEFINED ENV{DNNLROOT})
         set(DNNLROOT $ENV{DNNLROOT})
