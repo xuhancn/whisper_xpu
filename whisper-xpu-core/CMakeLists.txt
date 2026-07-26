@@ -48,14 +48,28 @@ target_link_libraries(whisper_xpu_sycl_core PUBLIC sycl)
 target_link_libraries(whisper_xpu_sycl_core PRIVATE ggml-sycl)
 
 if(WIN32)
-    # /WHOLEARCHIVE forces every object in ggml-sycl.lib into the DLL.
-    # Without it the linker drops unreferenced objects and the GPU
-    # operators wouldn't be available at runtime.
+    # /WHOLEARCHIVE embeds all ggml-sycl objects into the DLL.  The
+    # WINDOWS_EXPORT_ALL_SYMBOLS property only covers the DLL's own
+    # objects, so we export the ggml_backend_sycl_* API explicitly.
     target_link_options(whisper_xpu_sycl_core PRIVATE
         "/WHOLEARCHIVE:$<TARGET_FILE:ggml-sycl>"
+        /EXPORT:ggml_backend_sycl_init
+        /EXPORT:ggml_backend_is_sycl
+        /EXPORT:ggml_backend_sycl_buffer_type
+        /EXPORT:ggml_backend_sycl_split_buffer_type
+        /EXPORT:ggml_backend_sycl_comm_init
+        /EXPORT:ggml_backend_sycl_comm_free
+        /EXPORT:ggml_backend_sycl_comm_allreduce_tensor
+        /EXPORT:ggml_backend_sycl_host_buffer_type
+        /EXPORT:ggml_backend_sycl_print_sycl_devices
+        /EXPORT:ggml_backend_sycl_get_gpu_list
+        /EXPORT:ggml_backend_sycl_get_device_description
+        /EXPORT:ggml_backend_sycl_get_device_count
+        /EXPORT:ggml_backend_sycl_get_device_memory
+        /EXPORT:ggml_backend_sycl_reg
     )
-    # Auto-generate a .def file so that all symbols (including
-    # ggml_backend_sycl_*) are exported from the DLL.
+    # WINDOWS_EXPORT_ALL_SYMBOLS still needed for device_detect symbols
+    # and any internal symbols from the DLL's own objects.
     set_target_properties(whisper_xpu_sycl_core PROPERTIES
         WINDOWS_EXPORT_ALL_SYMBOLS ON
     )
