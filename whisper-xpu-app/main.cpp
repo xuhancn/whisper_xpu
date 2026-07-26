@@ -1,4 +1,4 @@
-#include <wx/wx.h>
+﻿#include <wx/wx.h>
 #include <wx/intl.h>
 #include "app_frame.h"
 // included via whisper_xpu_core.h

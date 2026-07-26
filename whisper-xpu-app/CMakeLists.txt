@@ -15,6 +15,9 @@ target_include_directories(whisper_xpu_app PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/portaudio/include
 )
 
+target_compile_options(whisper_xpu_app PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+
 target_link_libraries(whisper_xpu_app PRIVATE
     whisper_xpu_core
     wx::core
