@@ -3,14 +3,13 @@
 #include <wx/wx.h>
 #include <wx/textctrl.h>
 #include <wx/tglbtn.h>
-#include <wx/choice.h>
-#include <wx/stattext.h>
 #include <wx/statusbr.h>
+#include <wx/clipbrd.h>
 #include <memory>
 #include <atomic>
+#include <thread>
 #include "device_detect.h"
 #include "audio_capture.h"
-#include <thread>
 
 namespace whisper_xpu {
     class Engine;
@@ -19,6 +18,16 @@ namespace whisper_xpu {
 
 class AudioCapture;
 
+// ── Status bar field indices ──
+// Layout: [Mic info       ] [Device     ] [Model           ] [⚙]
+enum StatusField {
+    STATUS_MIC      = 0,
+    STATUS_DEVICE   = 1,
+    STATUS_MODEL    = 2,
+    STATUS_SETTINGS = 3,
+    STATUS_FIELDS_COUNT
+};
+
 class AppFrame : public wxFrame {
 public:
     AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size,
@@ -26,45 +35,34 @@ public:
     virtual ~AppFrame();
 
 private:
+    void CreateControls();
+    void CreateStatusBarFields();
+    void ShowSettingsDialog();
+
+    // Event handlers
     void OnToggleRecord(wxCommandEvent& event);
-    void OnSelectModel(wxCommandEvent& event);
-    void OnBrowseModel(wxCommandEvent& event);
-    void OnSelectDevice(wxCommandEvent& event);
-    void OnSelectMic(wxCommandEvent& event);
+    void OnClear(wxCommandEvent& event);
+    void OnCopy(wxCommandEvent& event);
+    void OnStatusBarClick(wxMouseEvent& event);
     void OnClose(wxCloseEvent& event);
 
-    void CreateControls();
-    void PopulateModelList();
-    void PopulateDeviceList();
-    void PopulateMicList();
-    void LogMessage(const wxString& text);
-    void SetRecording(bool active);
-    bool LoadEngine(const std::string& model_path);
+    // ── UI controls ──
+    wxTextCtrl*     m_transcriptText;   // main editable transcription area
+    wxToggleButton* m_recordBtn;        // start / stop recording
+    wxButton*       m_clearBtn;         // clear transcription text
+    wxButton*       m_copyBtn;          // copy to clipboard
 
-    wxChoice*       m_modelChoice;
-    wxChoice*       m_deviceChoice;
-    wxChoice*       m_micChoice;
-    wxToggleButton* m_recordBtn;
-    wxButton*       m_browseBtn;
-    wxTextCtrl*     m_outputText;
-    wxTextCtrl*     m_logText;
-    wxStatusBar*    m_statusBar;
-    wxString        m_modelDir;
-
-    std::unique_ptr<whisper_xpu::Engine> m_engine;
-    std::unique_ptr<AudioCapture> m_audioCapture;
+    // ── Settings state ──
+    int         m_micIndex    = kMicDefault;
+    int         m_deviceIndex = kDeviceAuto;
     std::string m_modelPath;
-    int m_deviceIndex;
-    int m_micIndex = kMicDefault;   // use system default
-    std::atomic<bool> m_recording{false};
-    std::thread m_audioThread;
+    wxString    m_hotkeyStr   = "Ctrl+Shift+R";
 
-    enum {
-        ID_TRANSCRIBE_RESULT = wxID_HIGHEST + 1,
-        ID_TRANSCRIBE_ERROR,
-        ID_DEVICE_CHOICE,
-        ID_MIC_CHOICE,
-    };
+    // ── Stubs for future engine / audio ──
+    std::unique_ptr<whisper_xpu::Engine> m_engine;
+    std::unique_ptr<AudioCapture>        m_audioCapture;
+    std::atomic<bool> m_recording{false};
+    std::thread       m_audioThread;
 
     wxDECLARE_EVENT_TABLE();
 };
