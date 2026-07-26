@@ -55,7 +55,7 @@ std::vector<DeviceInfo> get_available_devices() {
                 inf.vendor = d.get_info<sycl::info::device::vendor>();
                 inf.compute_units = (int)d.get_info<sycl::info::device::max_compute_units>();
                 inf.total_mem = d.get_info<sycl::info::device::global_mem_size>();
-                size_t f = 0, t = 0; ggml_backend_sycl_get_device_memory(idx, &f, &t); inf.free_mem = f;
+                inf.free_mem = 0;
                 list.push_back(inf); ++idx;
             }
     } catch (const std::exception &e) {

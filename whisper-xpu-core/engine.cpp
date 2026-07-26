@@ -161,6 +161,7 @@ Engine::Engine(const std::string& path, int device_id) : pimpl_(std::make_unique
     }
     auto cp = whisper_context_default_params();
     cp.use_gpu = pimpl_->gpu_initialized; cp.gpu_device = device_id;
+    cp.flash_attn = pimpl_->gpu_initialized;  // flash_attn only on GPU
     pimpl_->ctx = whisper_init_from_file_with_params(path.c_str(), cp);
     if (!pimpl_->ctx) throw std::runtime_error("Failed to load: " + path);
     if (!pimpl_->gpu_initialized) pimpl_->device_desc = "CPU (" + std::to_string(pimpl_->n_threads) + "t)";
