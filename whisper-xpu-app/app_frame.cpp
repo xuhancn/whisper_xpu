@@ -59,21 +59,17 @@ void AppFrame::CreateControls() {
     // ── Button bar ──
     auto* btnSizer = new wxBoxSizer(wxHORIZONTAL);
 
-    wxFont emojiFont(12, wxFONTFAMILY_DEFAULT, wxFONTSTYLE_NORMAL,
-                     wxFONTWEIGHT_NORMAL, false, "Segoe UI Emoji");
-
-    m_clearBtn = new wxButton(panel, wxID_ANY, "🗑  Clear");
-    m_clearBtn->SetFont(emojiFont);
+    // Note: avoid color emoji — Win32 Button control doesn't render them.
+    // Use BMP Unicode text symbols instead.
+    m_clearBtn = new wxButton(panel, wxID_ANY, "✕  Clear");
     m_clearBtn->SetToolTip("Clear all transcription text");
     btnSizer->Add(m_clearBtn, 0, wxRIGHT, 8);
 
     m_recordBtn = new wxToggleButton(panel, wxID_ANY, "⏺  Record");
-    m_recordBtn->SetFont(emojiFont);
     m_recordBtn->SetToolTip("Start / stop recording (toggle)");
     btnSizer->Add(m_recordBtn, 0, wxRIGHT, 8);
 
-    m_copyBtn = new wxButton(panel, wxID_ANY, "📋  Copy");
-    m_copyBtn->SetFont(emojiFont);
+    m_copyBtn = new wxButton(panel, wxID_ANY, "Copy");
     m_copyBtn->SetToolTip("Copy transcription to clipboard");
     btnSizer->Add(m_copyBtn, 0);
 
