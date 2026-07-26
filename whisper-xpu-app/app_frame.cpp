@@ -252,16 +252,16 @@ bool AppFrame::LoadEngine(const std::string& path) {
 // ──────────────────────────────────────────
 
 void AppFrame::ShowSettingsDialog() {
-    wxDialog dlg(this, wxID_ANY, "Settings", wxDefaultPosition, wxSize(440, 400));
-    auto* panel = new wxPanel(&dlg);
-    auto* root  = new wxBoxSizer(wxVERTICAL);
+    wxDialog dlg(this, wxID_ANY, "Settings",
+                 wxDefaultPosition, wxSize(500, 480),
+                 wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+    auto* root = new wxBoxSizer(wxVERTICAL);
 
     // ── Microphone ──
-    // Build a filtered label list + index map, then feed wxChoice.
     std::vector<wxString> micLabels;
-    std::vector<int>       micIndices;  // parallel → m_micList index
+    std::vector<int>       micIndices;
     micLabels.push_back("System Default");
-    micIndices.push_back(kMicDefault);  // sentinel
+    micIndices.push_back(kMicDefault);
 
     int micSel = 0;
     for (size_t i = 0; i < m_micList.size(); ++i) {
@@ -272,19 +272,19 @@ void AppFrame::ShowSettingsDialog() {
         micIndices.push_back((int)i);
     }
 
-    auto* micBox = new wxStaticBoxSizer(wxHORIZONTAL, panel, "Microphone");
-    auto* micChoice = new wxChoice(panel, wxID_ANY);
+    auto* micBox = new wxStaticBoxSizer(wxHORIZONTAL, &dlg, "Microphone");
+    auto* micChoice = new wxChoice(micBox->GetStaticBox(), wxID_ANY);
     for (size_t i = 0; i < micLabels.size(); ++i)
         micChoice->Append(micLabels[i]);
     micChoice->SetSelection(micSel);
-    micBox->Add(micChoice, 1, wxEXPAND | wxALL, 5);
-    root->Add(micBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
+    micBox->Add(micChoice, 1, wxEXPAND | wxALL, 4);
+    root->Add(micBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
 
     // ── XPU Device ──
     std::vector<wxString> devLabels;
-    std::vector<int>       devIndices;  // parallel → m_deviceList index
+    std::vector<int>       devIndices;
     devLabels.push_back("Auto");
-    devIndices.push_back(kDeviceAuto);  // sentinel
+    devIndices.push_back(kDeviceAuto);
 
     int devSel = 0;
     for (size_t i = 0; i < m_deviceList.size(); ++i) {
@@ -295,22 +295,22 @@ void AppFrame::ShowSettingsDialog() {
         devIndices.push_back((int)i);
     }
 
-    auto* devBox = new wxStaticBoxSizer(wxHORIZONTAL, panel, "Device");
-    auto* devChoice = new wxChoice(panel, wxID_ANY);
+    auto* devBox = new wxStaticBoxSizer(wxHORIZONTAL, &dlg, "Device");
+    auto* devChoice = new wxChoice(devBox->GetStaticBox(), wxID_ANY);
     for (size_t i = 0; i < devLabels.size(); ++i)
         devChoice->Append(devLabels[i]);
     devChoice->SetSelection(devSel);
-    devBox->Add(devChoice, 1, wxEXPAND | wxALL, 5);
-    root->Add(devBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
+    devBox->Add(devChoice, 1, wxEXPAND | wxALL, 4);
+    root->Add(devBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
 
     // ── Model path + browse ──
-    auto* modelBox = new wxStaticBoxSizer(wxHORIZONTAL, panel, "Model");
-    auto* modelText = new wxTextCtrl(panel, wxID_ANY, wxString(m_modelPath),
+    auto* modelBox = new wxStaticBoxSizer(wxHORIZONTAL, &dlg, "Model");
+    auto* modelText = new wxTextCtrl(modelBox->GetStaticBox(), wxID_ANY, wxString(m_modelPath),
                                      wxDefaultPosition, wxDefaultSize,
                                      wxTE_PROCESS_ENTER);
     modelText->SetToolTip("Path to a Whisper model file (.bin / .ggml / .gguf)");
-    modelBox->Add(modelText, 1, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-    auto* browseBtn = new wxButton(panel, wxID_ANY, "Browse...");
+    modelBox->Add(modelText, 1, wxALIGN_CENTER_VERTICAL | wxALL, 4);
+    auto* browseBtn = new wxButton(modelBox->GetStaticBox(), wxID_ANY, "Browse...");
     browseBtn->Bind(wxEVT_BUTTON, [&dlg, modelText](wxCommandEvent&) {
         wxFileDialog fd(&dlg, "Open Whisper Model File", "", "",
                         "Model files (*.bin;*.ggml;*.gguf)|*.bin;*.ggml;*.gguf"
@@ -319,12 +319,12 @@ void AppFrame::ShowSettingsDialog() {
         if (fd.ShowModal() == wxID_OK)
             modelText->SetValue(fd.GetPath());
     });
-    modelBox->Add(browseBtn, 0, wxALL, 5);
-    root->Add(modelBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
+    modelBox->Add(browseBtn, 0, wxALL, 4);
+    root->Add(modelBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
 
     // ── Record Hotkey ──
-    auto* hotkeyBox = new wxStaticBoxSizer(wxHORIZONTAL, panel, "Record Hotkey");
-    auto* hotkeyText = new wxTextCtrl(panel, wxID_ANY, m_hotkeyStr,
+    auto* hotkeyBox = new wxStaticBoxSizer(wxHORIZONTAL, &dlg, "Record Hotkey");
+    auto* hotkeyText = new wxTextCtrl(hotkeyBox->GetStaticBox(), wxID_ANY, m_hotkeyStr,
                                       wxDefaultPosition, wxSize(200, -1),
                                       wxTE_READONLY);
     hotkeyText->SetToolTip("Click this field, then press the desired key combination");
@@ -342,30 +342,31 @@ void AppFrame::ShowSettingsDialog() {
         } else if (key == WXK_SPACE) {
             combo += "Space";
         } else {
-            return; // ignore modifier-only or unsupported keys
+            return;
         }
         hotkeyText->SetValue(combo);
     });
-    hotkeyBox->Add(hotkeyText, 0, wxALL, 5);
-    hotkeyBox->Add(new wxStaticText(panel, wxID_ANY, "(Click field, press key)"),
-                   0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-    root->Add(hotkeyBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
-
-    root->AddStretchSpacer();
+    hotkeyBox->Add(hotkeyText, 0, wxALL, 4);
+    hotkeyBox->Add(new wxStaticText(hotkeyBox->GetStaticBox(), wxID_ANY,
+                    "(Click field, press key)"),
+                   0, wxALIGN_CENTER_VERTICAL | wxALL, 4);
+    root->Add(hotkeyBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
 
     // ── OK / Cancel ──
-    auto* dlgBtns = dlg.CreateButtonSizer(wxOK | wxCANCEL);
-    root->Add(dlgBtns, 0, wxALIGN_RIGHT | wxBOTTOM | wxRIGHT, 10);
+    auto* btnSizer = new wxBoxSizer(wxHORIZONTAL);
+    auto* okBtn     = new wxButton(&dlg, wxID_OK,     "OK");
+    auto* cancelBtn = new wxButton(&dlg, wxID_CANCEL, "Cancel");
+    okBtn->SetMinSize(wxSize(80, 28));
+    cancelBtn->SetMinSize(wxSize(80, 28));
+    btnSizer->AddStretchSpacer();
+    btnSizer->Add(okBtn,     0, wxRIGHT, 8);
+    btnSizer->Add(cancelBtn, 0);
+    root->Add(btnSizer, 0, wxEXPAND | wxTOP | wxBOTTOM | wxRIGHT, 8);
 
-    // Panel fills the dialog; sizer lays out the controls inside the panel.
-    panel->SetSizer(root);
-
-    auto* dlgSizer = new wxBoxSizer(wxVERTICAL);
-    dlgSizer->Add(panel, 1, wxEXPAND);
-    dlg.SetSizer(dlgSizer);
-
-    dlg.SetMinSize(wxSize(440, 400));
-    dlgSizer->SetSizeHints(&dlg);
+    dlg.SetSizer(root);
+    root->Fit(&dlg);
+    dlg.SetMinSize(wxSize(440, dlg.GetSize().y));
+    dlg.Centre();
 
     if (dlg.ShowModal() == wxID_OK) {
         // ── Read mic selection ──
