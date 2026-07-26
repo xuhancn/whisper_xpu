@@ -1,10 +1,13 @@
-#include <wx/wx.h>
+﻿#include <wx/wx.h>
+#include <wx/intl.h>
 #include "app_frame.h"
 // included via whisper_xpu_core.h
 
 class WhisperApp : public wxApp {
+    wxLocale m_locale;
 public:
     virtual bool OnInit() override {
+        m_locale.Init(wxLANGUAGE_DEFAULT);
         wxString model_path;
         int device_index = kDeviceAuto;
 

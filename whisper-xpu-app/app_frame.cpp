@@ -1,4 +1,4 @@
-#include "app_frame.h"
+﻿#include "app_frame.h"
 #include "whisper_xpu_core.h"
 #include "device_detect.h"
 #include "audio_capture.h"
@@ -59,15 +59,20 @@ void AppFrame::CreateControls() {
     // ── Button bar ──
     auto* btnSizer = new wxBoxSizer(wxHORIZONTAL);
 
-    m_clearBtn = new wxButton(panel, wxID_ANY, "🗑  Clear");
+    // Note: avoid color emoji and BMP symbols — Win32 Button control on some
+    // Windows builds/skins doesn't render them reliably. Use plain ASCII text.
+    m_clearBtn = new wxButton(panel, wxID_ANY, "Clear");
+    m_clearBtn->SetMinSize(wxSize(100, 32));
     m_clearBtn->SetToolTip("Clear all transcription text");
     btnSizer->Add(m_clearBtn, 0, wxRIGHT, 8);
 
-    m_recordBtn = new wxToggleButton(panel, wxID_ANY, "⏺  Record");
+    m_recordBtn = new wxToggleButton(panel, wxID_ANY, "Record");
+    m_recordBtn->SetMinSize(wxSize(100, 32));
     m_recordBtn->SetToolTip("Start / stop recording (toggle)");
     btnSizer->Add(m_recordBtn, 0, wxRIGHT, 8);
 
-    m_copyBtn = new wxButton(panel, wxID_ANY, "📋  Copy");
+    m_copyBtn = new wxButton(panel, wxID_ANY, "Copy");
+    m_copyBtn->SetMinSize(wxSize(100, 32));
     m_copyBtn->SetToolTip("Copy transcription to clipboard");
     btnSizer->Add(m_copyBtn, 0);
 
