@@ -58,6 +58,14 @@ private:
     std::string m_modelPath;
     wxString    m_hotkeyStr   = "Ctrl+Shift+R";
 
+    // ── Cached lists (populated once at startup) ──
+    std::vector<whisper_xpu::DeviceInfo> m_deviceList;
+    std::vector<AudioDeviceInfo>         m_micList;
+
+    // ── Helpers ──
+    void UpdateStatusBar();
+    bool LoadEngine(const std::string& path);
+
     // ── Stubs for future engine / audio ──
     std::unique_ptr<whisper_xpu::Engine> m_engine;
     std::unique_ptr<AudioCapture>        m_audioCapture;

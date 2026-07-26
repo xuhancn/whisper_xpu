@@ -6,6 +6,7 @@
 #include <wx/filedlg.h>
 #include <wx/msgdlg.h>
 #include <wx/statbox.h>
+#include <wx/filename.h>
 
 wxBEGIN_EVENT_TABLE(AppFrame, wxFrame)
     EVT_CLOSE(AppFrame::OnClose)
@@ -24,6 +25,15 @@ AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size
     CreateControls();
     SetMinSize(wxSize(600, 350));
     SetSize(900, 600);
+
+    // Populate cached device/mic lists and update status bar
+    m_deviceList = whisper_xpu::get_available_devices();
+    m_micList    = AudioCapture::enumerate_devices();
+    UpdateStatusBar();
+
+    // Load engine if a model was provided on the command line
+    if (!m_modelPath.empty())
+        LoadEngine(m_modelPath);
 }
 
 AppFrame::~AppFrame() {
@@ -109,6 +119,73 @@ void AppFrame::CreateStatusBarFields() {
 }
 
 // ──────────────────────────────────────────
+//  Status bar helpers
+// ──────────────────────────────────────────
+
+void AppFrame::UpdateStatusBar() {
+    // Mic field
+    wxString micLabel = "Mic: Default";
+    if (m_micIndex == kMicDefault) {
+        micLabel = "Mic: Default";
+    } else {
+        for (const auto& m : m_micList) {
+            if (m.index == m_micIndex) {
+                micLabel = "Mic: " + wxString(m.name);
+                break;
+            }
+        }
+    }
+    SetStatusText(micLabel, STATUS_MIC);
+
+    // Device field
+    wxString devLabel = "Device: Auto";
+    if (m_deviceIndex == kDeviceCPU) {
+        devLabel = "Device: CPU";
+    } else if (m_deviceIndex >= 0) {
+        for (const auto& d : m_deviceList) {
+            if (d.index == m_deviceIndex) {
+                devLabel = "Device: " + wxString(d.to_string());
+                break;
+            }
+        }
+    }
+    SetStatusText(devLabel, STATUS_DEVICE);
+
+    // Model field
+    wxString modelLabel = "No model";
+    if (!m_modelPath.empty()) {
+        modelLabel = wxFileName(m_modelPath).GetFullName();
+        if (m_engine) {
+            modelLabel += m_engine->is_gpu_enabled()
+                ? " [GPU]"
+                : " [CPU]";
+        }
+    }
+    SetStatusText(modelLabel, STATUS_MODEL);
+}
+
+bool AppFrame::LoadEngine(const std::string& path) {
+    if (m_recording) {
+        m_recording = false;
+        if (m_audioThread.joinable())
+            m_audioThread.join();
+        m_recordBtn->SetLabel("Record");
+        m_recordBtn->SetValue(false);
+    }
+    try {
+        m_engine = std::make_unique<whisper_xpu::Engine>(path, m_deviceIndex);
+        m_modelPath = path;
+        UpdateStatusBar();
+        return true;
+    } catch (const std::exception& e) {
+        wxMessageBox("Failed to load model:\n" + wxString(e.what()),
+                     "Error", wxOK | wxICON_ERROR);
+        m_engine.reset();
+        return false;
+    }
+}
+
+// ──────────────────────────────────────────
 //  Settings Dialog
 // ──────────────────────────────────────────
 
@@ -121,8 +198,15 @@ void AppFrame::ShowSettingsDialog() {
     auto* micBox = new wxStaticBoxSizer(wxHORIZONTAL, panel, "Microphone");
     auto* micChoice = new wxChoice(panel, wxID_ANY);
     micChoice->Append("System Default");
-    // TODO: populate from AudioCapture::enumerate_devices()
-    micChoice->SetSelection(0);
+    {
+        int sel = 0;
+        for (size_t i = 0; i < m_micList.size(); ++i) {
+            micChoice->Append(wxString(m_micList[i].name));
+            if (m_micList[i].index == m_micIndex)
+                sel = static_cast<int>(i + 1);
+        }
+        micChoice->SetSelection(sel);
+    }
     micBox->Add(micChoice, 1, wxEXPAND | wxALL, 5);
     root->Add(micBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
 
@@ -130,8 +214,15 @@ void AppFrame::ShowSettingsDialog() {
     auto* devBox = new wxStaticBoxSizer(wxHORIZONTAL, panel, "Device");
     auto* devChoice = new wxChoice(panel, wxID_ANY);
     devChoice->Append("Auto");
-    // TODO: populate from whisper_xpu::get_available_devices()
-    devChoice->SetSelection(0);
+    {
+        int sel = 0;
+        for (size_t i = 0; i < m_deviceList.size(); ++i) {
+            devChoice->Append(wxString(m_deviceList[i].to_string()));
+            if (m_deviceList[i].index == m_deviceIndex)
+                sel = static_cast<int>(i + 1);
+        }
+        devChoice->SetSelection(sel);
+    }
     devBox->Add(devChoice, 1, wxEXPAND | wxALL, 5);
     root->Add(devBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
 
@@ -200,11 +291,38 @@ void AppFrame::ShowSettingsDialog() {
     dlgSizer->SetSizeHints(&dlg);
 
     if (dlg.ShowModal() == wxID_OK) {
-        // Stub — save settings for future wiring
-        // m_micIndex    = ...;
-        // m_deviceIndex = ...;
-        // m_modelPath   = modelText->GetValue().ToStdString();
-        // m_hotkeyStr   = hotkeyText->GetValue();
+        // ── Read mic selection ──
+        int newMicIdx = kMicDefault;
+        {
+            int sel = micChoice->GetSelection();
+            if (sel > 0 && static_cast<size_t>(sel - 1) < m_micList.size())
+                newMicIdx = m_micList[sel - 1].index;
+        }
+
+        // ── Read device selection ──
+        int newDevIdx = kDeviceAuto;
+        {
+            int sel = devChoice->GetSelection();
+            if (sel > 0 && static_cast<size_t>(sel - 1) < m_deviceList.size())
+                newDevIdx = m_deviceList[sel - 1].index;
+        }
+
+        std::string newModelPath = modelText->GetValue().ToStdString();
+        wxString newHotkey       = hotkeyText->GetValue();
+
+        bool devChanged   = (newDevIdx != m_deviceIndex);
+        bool modelChanged = (newModelPath != m_modelPath);
+
+        m_micIndex    = newMicIdx;
+        m_deviceIndex = newDevIdx;
+        m_modelPath   = newModelPath;
+        m_hotkeyStr   = newHotkey;
+
+        UpdateStatusBar();
+
+        // Re-init engine if device or model changed
+        if ((devChanged || modelChanged) && !m_modelPath.empty())
+            LoadEngine(m_modelPath);
     }
 }
 
