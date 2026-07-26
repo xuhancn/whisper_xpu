@@ -35,22 +35,6 @@ static DeviceClass classify_device(const sycl::device &dev) {
 #endif
 
 // ---------------------------------------------------------------------------
-// SEH guard for the single crash-prone call.  Only sycl::platform::get_platforms()
-// can AV inside sycl8.dll on broken driver / Level Zero combos.  Everything
-// else (device iteration, info queries) runs outside the guard.
-// icpx supports __try/__except with C++ objects (no MSVC C2712 limitation).
-// __except(1) = EXCEPTION_EXECUTE_HANDLER — catches all SEH exceptions.
-#ifdef _WIN32
-#define SYCL_GET_PLATFORMS(out) \
-    do { \
-        __try { out = sycl::platform::get_platforms(); } \
-        __except(1) { out.clear(); } \
-    } while(0)
-#else
-#define SYCL_GET_PLATFORMS(out) out = sycl::platform::get_platforms()
-#endif
-
-// ---------------------------------------------------------------------------
 WHISPER_XPU_SYCL_API std::vector<DeviceInfo> get_available_devices() {
     std::vector<DeviceInfo> list;
 
@@ -63,13 +47,9 @@ WHISPER_XPU_SYCL_API std::vector<DeviceInfo> get_available_devices() {
     list.push_back(cpu);
 
 #ifdef WHISPER_XPU_HAS_SYCL
-    std::vector<sycl::platform> platforms;
-    SYCL_GET_PLATFORMS(platforms);
-
     int gpu_count = 0;
-    for (auto &p : platforms) {
-        auto devices = p.get_devices(sycl::info::device_type::gpu);
-        for (auto &d : devices) {
+    for (auto &p : sycl::platform::get_platforms()) {
+        for (auto &d : p.get_devices(sycl::info::device_type::gpu)) {
             DeviceInfo inf;
             inf.index         = gpu_count;
             inf.device_class  = classify_device(d);
@@ -89,9 +69,7 @@ WHISPER_XPU_SYCL_API std::vector<DeviceInfo> get_available_devices() {
 // ---------------------------------------------------------------------------
 WHISPER_XPU_SYCL_API bool has_intel_gpu() {
 #ifdef WHISPER_XPU_HAS_SYCL
-    std::vector<sycl::platform> platforms;
-    SYCL_GET_PLATFORMS(platforms);
-    for (auto &p : platforms)
+    for (auto &p : sycl::platform::get_platforms())
         for (auto &g : p.get_devices(sycl::info::device_type::gpu))
             if (g.get_info<sycl::info::device::vendor>().find("Intel") != std::string::npos)
                 return true;
