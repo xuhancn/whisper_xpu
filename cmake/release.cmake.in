@@ -19,28 +19,35 @@ set(LIB "${BIN_DIR}/whisper-xpu-core/${CFG}/whisper_xpu_core.lib")
 if(EXISTS "${LIB}")
     file(COPY "${LIB}" DESTINATION "${REL_DIR}/lib")
 else()
-    message(FATAL_ERROR "whisper_xpu_core.lib not found")
+    message(FATAL_ERROR "whisper_xpu_core.lib not found at ${LIB}")
 endif()
 
 # ── App ──
 set(APP "${BIN_DIR}/whisper-xpu-app/${CFG}/whisper_xpu_app.exe")
 if(EXISTS "${APP}")
     file(COPY "${APP}" DESTINATION "${REL_DIR}/bin")
-    message(STATUS "App: ${APP}")
 endif()
 
-# ── Runtime DLLs ──
-# SYCL runtime (always needed in GPU build)
-set(SYCL_DLL "@SYCL_LIBRARY_DIR@/sycl.dll")
-if(EXISTS "${SYCL_DLL}")
-    file(COPY "${SYCL_DLL}" DESTINATION "${REL_DIR}/bin")
-endif()
+# ── Intel oneAPI compiler runtime DLLs ──
+get_filename_component(_rt_root "@SYCL_LIBRARY_DIR@/.." ABSOLUTE)
+file(GLOB _rt_dlls
+    "${_rt_root}/bin/sycl*.dll"
+    "${_rt_root}/bin/svml_dispmd.dll"
+    "${_rt_root}/bin/libmmd.dll"
+    "${_rt_root}/bin/libiomp5md.dll"
+    "${_rt_root}/bin/ur_win_proxy_loader.dll")
+foreach(_d ${_rt_dlls})
+    if(EXISTS "${_d}")
+        file(COPY "${_d}" DESTINATION "${REL_DIR}/bin")
+    endif()
+endforeach()
 
-# oneDNN DLL (only when ONEDNN_STATIC=OFF)
+
+# ── oneDNN DLL (ONEDNN_STATIC=OFF only) ──
 if("@ONEDNN_STATIC@" STREQUAL "OFF" AND "@DNNL_FOUND@" STREQUAL "TRUE")
-    get_target_property(DLL DNNL::dnnl IMPORTED_LOCATION_RELEASE)
-    if(DLL AND EXISTS "${DLL}")
-        file(COPY "${DLL}" DESTINATION "${REL_DIR}/bin")
+    get_target_property(_d DNNL::dnnl IMPORTED_LOCATION_RELEASE)
+    if(_d AND EXISTS "${_d}")
+        file(COPY "${_d}" DESTINATION "${REL_DIR}/bin")
     endif()
 endif()
 
@@ -49,7 +56,7 @@ file(GLOB_RECURSE FILES "${REL_DIR}/*")
 message(STATUS "Release: ${REL_DIR}")
 foreach(F ${FILES})
     file(RELATIVE_PATH R "${REL_DIR}" "${F}")
-    get_filename_component(SZ "${F}" SIZE)
+    file(SIZE "${F}" SZ)
     math(EXPR SZ "${SZ} / 1024")
     message(STATUS "  ${R} (${SZ} KB)")
 endforeach()
