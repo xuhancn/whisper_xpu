@@ -16,12 +16,10 @@ target_link_libraries(test_config_ui PRIVATE
 )
 add_test(NAME config_ui/audio COMMAND test_config_ui)
 
-# ── SYCL-dependent test — compiled with Intel toolset ──
-# Follows the same pattern as test_sycl_device_detect_sycl
+# ── SYCL-dependent test — linked against whisper_xpu_sycl_core import lib ──
 if(HAVE_SYCL)
     add_executable(test_config_sycl
         test_config_sycl.cpp
-        ${CMAKE_SOURCE_DIR}/whisper-xpu-core/sycl_src/device_detect.cpp
     )
     target_include_directories(test_config_sycl PRIVATE
         ${CMAKE_SOURCE_DIR}/whisper-xpu-core
@@ -32,18 +30,9 @@ if(HAVE_SYCL)
         ${SYCL_INCLUDE_DIR}
     )
     target_compile_definitions(test_config_sycl PRIVATE WHISPER_XPU_HAS_SYCL)
-    target_compile_options(test_config_sycl PRIVATE -fsycl -DWIN32)
-    if(WIN32 AND CMAKE_GENERATOR MATCHES "Visual Studio")
-        if(DEFINED ENV{DNNL_INTEL_TOOLSET})
-            set_target_properties(test_config_sycl PROPERTIES
-                VS_PLATFORM_TOOLSET "$ENV{DNNL_INTEL_TOOLSET}")
-        else()
-            set_target_properties(test_config_sycl PROPERTIES
-                VS_PLATFORM_TOOLSET "Intel C++ Compiler 2025")
-        endif()
-    endif()
     target_link_libraries(test_config_sycl PRIVATE
         GTest::gtest GTest::gtest_main
+        whisper_xpu_sycl_core
         sycl
     )
     if(SYCL_LIBRARY_DIR)

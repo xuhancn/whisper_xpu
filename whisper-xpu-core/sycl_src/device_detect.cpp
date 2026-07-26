@@ -35,45 +35,71 @@ static DeviceClass classify_device(const sycl::device &dev) {
 #endif
 
 // ---------------------------------------------------------------------------
-std::vector<DeviceInfo> get_available_devices() {
-    std::vector<DeviceInfo> list;
-    {
-        DeviceInfo cpu;
-        cpu.index = kDeviceCPU; cpu.device_class = DeviceClass::CPU; cpu.name = "CPU"; cpu.vendor = "CPU";
-        cpu.compute_units = (int)std::thread::hardware_concurrency(); cpu.total_mem = 0; cpu.free_mem = 0;
-        list.push_back(cpu);
-    }
-#ifdef WHISPER_XPU_HAS_SYCL
-    try {
-        int idx = 0;
-        for (auto &p : sycl::platform::get_platforms())
-            for (auto &d : p.get_devices(sycl::info::device_type::gpu)) {
-                DeviceInfo inf;
-                inf.index = idx; inf.device_class = classify_device(d);
-                inf.name = d.get_info<sycl::info::device::name>();
-                inf.vendor = d.get_info<sycl::info::device::vendor>();
-                inf.compute_units = (int)d.get_info<sycl::info::device::max_compute_units>();
-                inf.total_mem = d.get_info<sycl::info::device::global_mem_size>();
-                inf.free_mem = 0;
-                list.push_back(inf); ++idx;
-            }
-    } catch (const std::exception &e) {
-        DeviceInfo err; err.index = -2; err.device_class = DeviceClass::Unknown; err.name = "SYCL error: " + std::string(e.what()); list.push_back(err);
-    }
+// SEH guard for the single crash-prone call.  Only sycl::platform::get_platforms()
+// can AV inside sycl8.dll on broken driver / Level Zero combos.  Everything
+// else (device iteration, info queries) runs outside the guard.
+// icpx supports __try/__except with C++ objects (no MSVC C2712 limitation).
+// __except(1) = EXCEPTION_EXECUTE_HANDLER — catches all SEH exceptions.
+#ifdef _WIN32
+#define SYCL_GET_PLATFORMS(out) \
+    do { \
+        __try { out = sycl::platform::get_platforms(); } \
+        __except(1) { out.clear(); } \
+    } while(0)
 #else
-    { DeviceInfo s; s.index = -2; s.device_class = DeviceClass::Unknown; s.name = "SYCL not compiled"; list.push_back(s); }
+#define SYCL_GET_PLATFORMS(out) out = sycl::platform::get_platforms()
+#endif
+
+// ---------------------------------------------------------------------------
+WHISPER_XPU_SYCL_API std::vector<DeviceInfo> get_available_devices() {
+    std::vector<DeviceInfo> list;
+
+    // CPU is always available
+    DeviceInfo cpu;
+    cpu.index = kDeviceCPU; cpu.device_class = DeviceClass::CPU;
+    cpu.name = "CPU"; cpu.vendor = "CPU";
+    cpu.compute_units = (int)std::thread::hardware_concurrency();
+    cpu.total_mem = 0; cpu.free_mem = 0;
+    list.push_back(cpu);
+
+#ifdef WHISPER_XPU_HAS_SYCL
+    std::vector<sycl::platform> platforms;
+    SYCL_GET_PLATFORMS(platforms);
+
+    int gpu_count = 0;
+    for (auto &p : platforms) {
+        auto devices = p.get_devices(sycl::info::device_type::gpu);
+        for (auto &d : devices) {
+            DeviceInfo inf;
+            inf.index         = gpu_count;
+            inf.device_class  = classify_device(d);
+            inf.name          = d.get_info<sycl::info::device::name>();
+            inf.vendor        = d.get_info<sycl::info::device::vendor>();
+            inf.compute_units = (int)d.get_info<sycl::info::device::max_compute_units>();
+            inf.total_mem     = d.get_info<sycl::info::device::global_mem_size>();
+            inf.free_mem      = 0;
+            list.push_back(inf);
+            ++gpu_count;
+        }
+    }
 #endif
     return list;
 }
 
-bool has_intel_gpu() {
+// ---------------------------------------------------------------------------
+WHISPER_XPU_SYCL_API bool has_intel_gpu() {
 #ifdef WHISPER_XPU_HAS_SYCL
-    try { for (auto &p : sycl::platform::get_platforms()) for (auto &g : p.get_devices(sycl::info::device_type::gpu)) if (g.get_info<sycl::info::device::vendor>().find("Intel") != std::string::npos) return true; } catch (...) {}
+    std::vector<sycl::platform> platforms;
+    SYCL_GET_PLATFORMS(platforms);
+    for (auto &p : platforms)
+        for (auto &g : p.get_devices(sycl::info::device_type::gpu))
+            if (g.get_info<sycl::info::device::vendor>().find("Intel") != std::string::npos)
+                return true;
 #endif
     return false;
 }
 
-DeviceInfo get_device_info(int i) {
+WHISPER_XPU_SYCL_API DeviceInfo get_device_info(int i) {
     auto d = get_available_devices();
     for (auto &x : d) if (x.index == i) return x;
     for (auto &x : d) if (x.index == kDeviceCPU) return x;

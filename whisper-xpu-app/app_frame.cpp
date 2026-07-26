@@ -16,21 +16,12 @@ wxEND_EVENT_TABLE()
 //  SEH-safe wrappers (no C++ object unwinding)
 // ──────────────────────────────────────────
 
-// ── Thin wrappers with error handling ──
-// SYCL device enumeration (get_available_devices) is intentionally
-// NOT called here — the Intel GPU driver / Level Zero version on
-// this system can cause an AV inside sycl8.dll that can't be caught
-// from MSVC code (C2712 prevents __try/__except with vector).  The
-// Engine constructor handles device auto-selection internally.
-
+// ── Thin wrapper ──
+// get_available_devices() is compiled with icpx inside
+// whisper_xpu_sycl_core.dll.  SEH guards inside the DLL catch any
+// AV from sycl8.dll — the MSVC caller never sees a crash.
 static std::vector<whisper_xpu::DeviceInfo> safe_get_devices() {
-    // sycl::platform::get_platforms() inside sycl8.dll can AV with
-    // a null function pointer on certain Intel GPU driver / Level Zero
-    // version combinations.  We skip enumeration entirely and let the
-    // Engine auto-select a device when a model is loaded.
-    //
-    // The settings dialog shows only "Auto" when the list is empty.
-    return {};
+    return whisper_xpu::get_available_devices();
 }
 
 static std::vector<AudioDeviceInfo> safe_enum_audio() {
@@ -64,10 +55,9 @@ AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size
     SetSize(900, 600);
 
     // Populate cached device/mic lists and update status bar.
-    // SYCL init is deferred to OnIdleInit (after event loop starts) to
-    // avoid a null-function-pointer crash inside sycl8.dll's platform
-    // enumeration when the Intel GPU driver version doesn't match the
-    // oneAPI runtime.  Audio enumeration is safe — no SYCL dependency.
+    // SYCL device enumeration is deferred to OnIdleInit (after event
+    // loop starts) via whisper_xpu_sycl_core.dll.  The DLL is
+    // delay-loaded so the app starts regardless of sycl8.dll presence.
     m_micList = safe_enum_audio();
     UpdateStatusBar();
 
@@ -75,7 +65,7 @@ AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size
     if (!m_modelPath.empty())
         LoadEngine(m_modelPath);
 
-    // Delay SYCL device detection until the event loop is running
+    // Deferred SYCL device enumeration after event loop is running
     Bind(wxEVT_IDLE, &AppFrame::OnIdleInit, this);
 }
 
@@ -83,9 +73,11 @@ void AppFrame::OnIdleInit(wxIdleEvent& event) {
     // Run once: unbind immediately so we only fire once.
     Unbind(wxEVT_IDLE, &AppFrame::OnIdleInit, this);
 
-    // SYCL platform enumeration is skipped (safe_get_devices returns
-    // empty).  The Engine auto-selects the device when a model loads.
-    // If the device list is ever non-empty here, update the status bar.
+    // Enumerate SYCL devices through the icpx-compiled DLL.  This is
+    // deferred until the event loop is running so the window is visible
+    // before any SYCL call.  If sycl8.dll is absent or the driver
+    // crashes, safe_get_devices() catches it and returns empty.
+    m_deviceList = safe_get_devices();
     UpdateStatusBar();
 
     event.Skip();
@@ -178,28 +170,44 @@ void AppFrame::CreateStatusBarFields() {
 // ──────────────────────────────────────────
 
 void AppFrame::UpdateStatusBar() {
-    // Mic field
-    wxString micLabel = "Mic: Default";
+    // Mic field — show actual device name, append (Default) if system default
+    wxString micLabel = wxT("Mic: N/A");
     if (m_micIndex == kMicDefault) {
-        micLabel = "Mic: Default";
+        for (const auto& m : m_micList) {
+            if (m.is_default) {
+                micLabel = wxT("Mic: ") + wxString(m.name) + wxT(" (Default)");
+                break;
+            }
+        }
+        if (micLabel == wxT("Mic: N/A") && !m_micList.empty()) {
+            micLabel = wxT("Mic: ") + wxString(m_micList[0].name);
+        }
     } else {
         for (const auto& m : m_micList) {
             if (m.index == m_micIndex) {
-                micLabel = "Mic: " + wxString(m.name);
+                micLabel = wxT("Mic: ") + wxString(m.name);
                 break;
             }
         }
     }
     SetStatusText(micLabel, STATUS_MIC);
 
-    // Device field
-    wxString devLabel = "Device: Auto";
+    // Device field — shows CPU/GPU info or Auto if nothing enumerated
+    wxString devLabel = wxT("Device: Auto");
     if (m_deviceIndex == kDeviceCPU) {
-        devLabel = "Device: CPU";
+        devLabel = wxT("Device: CPU");
     } else if (m_deviceIndex >= 0) {
         for (const auto& d : m_deviceList) {
             if (d.index == m_deviceIndex) {
-                devLabel = "Device: " + wxString(d.to_string());
+                devLabel = wxT("Device: ") + wxString(d.to_string());
+                break;
+            }
+        }
+    } else if (m_deviceIndex == kDeviceAuto) {
+        // Auto-select: show first GPU if available
+        for (const auto& d : m_deviceList) {
+            if (d.index >= 0) {
+                devLabel = wxT("Device: ") + wxString(d.to_string()) + wxT(" [Auto]");
                 break;
             }
         }
@@ -249,34 +257,49 @@ void AppFrame::ShowSettingsDialog() {
     auto* root  = new wxBoxSizer(wxVERTICAL);
 
     // ── Microphone ──
+    // Build a filtered label list + index map, then feed wxChoice.
+    std::vector<wxString> micLabels;
+    std::vector<int>       micIndices;  // parallel → m_micList index
+    micLabels.push_back("System Default");
+    micIndices.push_back(kMicDefault);  // sentinel
+
+    int micSel = 0;
+    for (size_t i = 0; i < m_micList.size(); ++i) {
+        wxString name(m_micList[i].name);
+        if (name.Trim().IsEmpty()) continue;
+        if (m_micList[i].index == m_micIndex) micSel = (int)micLabels.size();
+        micLabels.push_back(name);
+        micIndices.push_back((int)i);
+    }
+
     auto* micBox = new wxStaticBoxSizer(wxHORIZONTAL, panel, "Microphone");
     auto* micChoice = new wxChoice(panel, wxID_ANY);
-    micChoice->Append("System Default");
-    {
-        int sel = 0;
-        for (size_t i = 0; i < m_micList.size(); ++i) {
-            micChoice->Append(wxString(m_micList[i].name));
-            if (m_micList[i].index == m_micIndex)
-                sel = static_cast<int>(i + 1);
-        }
-        micChoice->SetSelection(sel);
-    }
+    for (size_t i = 0; i < micLabels.size(); ++i)
+        micChoice->Append(micLabels[i]);
+    micChoice->SetSelection(micSel);
     micBox->Add(micChoice, 1, wxEXPAND | wxALL, 5);
     root->Add(micBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
 
     // ── XPU Device ──
+    std::vector<wxString> devLabels;
+    std::vector<int>       devIndices;  // parallel → m_deviceList index
+    devLabels.push_back("Auto");
+    devIndices.push_back(kDeviceAuto);  // sentinel
+
+    int devSel = 0;
+    for (size_t i = 0; i < m_deviceList.size(); ++i) {
+        wxString label(m_deviceList[i].to_string());
+        if (label.Trim().IsEmpty()) continue;
+        if (m_deviceList[i].index == m_deviceIndex) devSel = (int)devLabels.size();
+        devLabels.push_back(label);
+        devIndices.push_back((int)i);
+    }
+
     auto* devBox = new wxStaticBoxSizer(wxHORIZONTAL, panel, "Device");
     auto* devChoice = new wxChoice(panel, wxID_ANY);
-    devChoice->Append("Auto");
-    {
-        int sel = 0;
-        for (size_t i = 0; i < m_deviceList.size(); ++i) {
-            devChoice->Append(wxString(m_deviceList[i].to_string()));
-            if (m_deviceList[i].index == m_deviceIndex)
-                sel = static_cast<int>(i + 1);
-        }
-        devChoice->SetSelection(sel);
-    }
+    for (size_t i = 0; i < devLabels.size(); ++i)
+        devChoice->Append(devLabels[i]);
+    devChoice->SetSelection(devSel);
     devBox->Add(devChoice, 1, wxEXPAND | wxALL, 5);
     root->Add(devBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
 
@@ -349,16 +372,20 @@ void AppFrame::ShowSettingsDialog() {
         int newMicIdx = kMicDefault;
         {
             int sel = micChoice->GetSelection();
-            if (sel > 0 && static_cast<size_t>(sel - 1) < m_micList.size())
-                newMicIdx = m_micList[sel - 1].index;
+            if (sel >= 0 && static_cast<size_t>(sel) < micIndices.size()) {
+                int idx = micIndices[sel];
+                newMicIdx = (idx == kMicDefault) ? kMicDefault : m_micList[idx].index;
+            }
         }
 
         // ── Read device selection ──
         int newDevIdx = kDeviceAuto;
         {
             int sel = devChoice->GetSelection();
-            if (sel > 0 && static_cast<size_t>(sel - 1) < m_deviceList.size())
-                newDevIdx = m_deviceList[sel - 1].index;
+            if (sel >= 0 && static_cast<size_t>(sel) < devIndices.size()) {
+                int idx = devIndices[sel];
+                newDevIdx = (idx == kDeviceAuto) ? kDeviceAuto : m_deviceList[idx].index;
+            }
         }
 
         std::string newModelPath = modelText->GetValue().ToStdString();

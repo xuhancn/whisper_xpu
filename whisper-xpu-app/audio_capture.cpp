@@ -84,9 +84,14 @@ std::vector<AudioDeviceInfo> AudioCapture::enumerate_devices() {
         if (!info || info->maxInputChannels < 1)
             continue;
 
+        // Skip devices with empty or whitespace-only names
+        std::string name = info->name ? info->name : "";
+        if (name.empty() || name.find_first_not_of(" \t\r\n") == std::string::npos)
+            continue;
+
         AudioDeviceInfo dev;
         dev.index        = i;
-        dev.name         = info->name;
+        dev.name         = name;
         dev.max_channels = info->maxInputChannels;
         dev.sample_rate  = info->defaultSampleRate;
         dev.is_default   = (i == default_dev);
