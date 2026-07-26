@@ -112,7 +112,15 @@ target_compile_options(whisper_xpu_cpu_core PRIVATE
 target_link_libraries(whisper_xpu_cpu_core PUBLIC whisper)
 
 # Import ggml_backend_sycl_* and device_detect symbols from the SYCL DLL.
+# /DELAYLOAD so the SYCL DLL doesn't load at process startup — ZES_ENABLE_SYSMAN
+# must be set first (done in main.cpp before any SYCL call).
 target_link_libraries(whisper_xpu_cpu_core PRIVATE whisper_xpu_sycl_core)
+if(WIN32)
+    target_link_options(whisper_xpu_cpu_core PRIVATE
+        /DELAYLOAD:whisper_xpu_sycl_core.dll
+    )
+    target_link_libraries(whisper_xpu_cpu_core PRIVATE delayimp)
+endif()
 
 if(WIN32)
     target_link_libraries(whisper_xpu_cpu_core PRIVATE winmm)
