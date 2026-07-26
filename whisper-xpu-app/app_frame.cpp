@@ -62,14 +62,17 @@ void AppFrame::CreateControls() {
     // Note: avoid color emoji — Win32 Button control doesn't render them.
     // Use BMP Unicode text symbols instead.
     m_clearBtn = new wxButton(panel, wxID_ANY, "✕  Clear");
+    m_clearBtn->SetMinSize(wxSize(100, 32));
     m_clearBtn->SetToolTip("Clear all transcription text");
     btnSizer->Add(m_clearBtn, 0, wxRIGHT, 8);
 
-    m_recordBtn = new wxToggleButton(panel, wxID_ANY, "⏺  Record");
+    m_recordBtn = new wxToggleButton(panel, wxID_ANY, "●  Record");
+    m_recordBtn->SetMinSize(wxSize(100, 32));
     m_recordBtn->SetToolTip("Start / stop recording (toggle)");
     btnSizer->Add(m_recordBtn, 0, wxRIGHT, 8);
 
     m_copyBtn = new wxButton(panel, wxID_ANY, "Copy");
+    m_copyBtn->SetMinSize(wxSize(100, 32));
     m_copyBtn->SetToolTip("Copy transcription to clipboard");
     btnSizer->Add(m_copyBtn, 0);
 
