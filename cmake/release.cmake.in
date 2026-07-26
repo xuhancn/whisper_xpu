@@ -42,14 +42,6 @@ foreach(_d ${_rt_dlls})
     endif()
 endforeach()
 
-# ── Intel MKL SYCL DLLs ──
-get_filename_component(_mkl "${_rt_root}/../../mkl/latest" ABSOLUTE)
-file(GLOB _mkl_dlls "${_mkl}/bin/mkl_sycl*.dll")
-foreach(_d ${_mkl_dlls})
-    if(EXISTS "${_d}")
-        file(COPY "${_d}" DESTINATION "${REL_DIR}/bin")
-    endif()
-endforeach()
 
 # ── oneDNN DLL (ONEDNN_STATIC=OFF only) ──
 if("@ONEDNN_STATIC@" STREQUAL "OFF" AND "@DNNL_FOUND@" STREQUAL "TRUE")

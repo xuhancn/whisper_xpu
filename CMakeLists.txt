@@ -35,6 +35,8 @@ include(cmake/FindDNNL.cmake)
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 set(GGML_SYCL ON CACHE BOOL "Enable SYCL in whisper.cpp")
 set(GGML_SYCL_DNN ON CACHE BOOL "Enable oneDNN in whisper.cpp SYCL backend")
+set(MKL_LINK "static" CACHE STRING "Link MKL statically (avoid runtime DLLs)")
+set(MKL_SYCL_LINK "static" CACHE STRING "Link MKL SYCL statically")
 set(GGML_CUDA OFF CACHE BOOL "" FORCE)
 set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
 set(WHISPER_NO_EXAMPLES ON CACHE BOOL "" FORCE)
@@ -61,11 +63,8 @@ add_subdirectory(whisper-xpu-app)
 add_subdirectory(tests)
 
 # ── Release package ──
-# Generates release/ with include/ + lib/ + bin/ (runtime DLLs)
-# Build: cmake --build . --target release
 configure_file(cmake/release.cmake.in "${CMAKE_BINARY_DIR}/release.cmake" @ONLY)
 add_custom_target(release
     COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/release.cmake"
     DEPENDS whisper_xpu_app
-    COMMENT "Creating release package in ${CMAKE_BINARY_DIR}/release/"
-)
+    COMMENT "Creating release package in ${CMAKE_BINARY_DIR}/release/")
