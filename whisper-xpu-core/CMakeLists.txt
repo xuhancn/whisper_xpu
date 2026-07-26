@@ -1,20 +1,26 @@
 # ═════════════════════════════════════════════════════════════════════
 # whisper_xpu_sycl_core.dll  (icpx-compiled SHARED)
-#   All SYCL code: device enumeration + ggml-sycl GPU operators + oneDNN
+#   Single core DLL: engine, merge_segments, device enumeration,
+#   ggml-sycl GPU operators, oneDNN — all in one place.
 # ═════════════════════════════════════════════════════════════════════
 
 add_library(whisper_xpu_sycl_core SHARED
     sycl_src/device_detect.cpp
+    engine.cpp
+    merge_segments.cpp
 )
 
 target_compile_definitions(whisper_xpu_sycl_core PRIVATE
-    WHISPER_XPU_BUILD_SYCL_LIB
+    WHISPER_XPU_BUILD_MAIN_LIB      # Engine, merge_segments exports
+    WHISPER_XPU_BUILD_SYCL_LIB      # device_detect exports
     WHISPER_XPU_BUILD_SHARED_LIBS
     WHISPER_XPU_HAS_SYCL
 )
 
-target_include_directories(whisper_xpu_sycl_core PRIVATE
+target_include_directories(whisper_xpu_sycl_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(whisper_xpu_sycl_core PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/sycl_src
     ${SYCL_INCLUDE_DIR}
     ${CMAKE_SOURCE_DIR}/third_party/whisper.cpp/include
@@ -38,13 +44,16 @@ endif()
 if(SYCL_LIBRARY_DIR)
     target_link_directories(whisper_xpu_sycl_core PUBLIC ${SYCL_LIBRARY_DIR})
 endif()
-target_link_libraries(whisper_xpu_sycl_core PUBLIC sycl)
+target_link_libraries(whisper_xpu_sycl_core PUBLIC sycl whisper)
+
+if(WIN32)
+    target_link_libraries(whisper_xpu_sycl_core PRIVATE winmm)
+endif()
 
 # ── ggml-sycl: link statically, export all its symbols ──
 # ggml-sycl contains all GPU kernel implementations.  We embed it
-# into the SYCL DLL so that the CPU DLL imports ggml_backend_sycl_*
-# from here rather than linking ggml-sycl directly (which would pull
-# SYCL runtime dependencies into the MSVC binary).
+# into the SYCL DLL via /WHOLEARCHIVE so that ggml_backend_sycl_*
+# symbols are available to engine.cpp within the same DLL.
 target_link_libraries(whisper_xpu_sycl_core PRIVATE ggml-sycl)
 
 if(WIN32)
@@ -89,48 +98,6 @@ if(TARGET DNNL::dnnl AND ONEDNN_STATIC)
     target_link_libraries(whisper_xpu_sycl_core PRIVATE DNNL::dnnl)
 endif()
 
-# ═════════════════════════════════════════════════════════════════════
-# whisper_xpu_cpu_core.dll  (MSVC-compiled SHARED)
-#   Engine, merge_segments — no SYCL compilation, no icpx.
-#   Imports ggml_backend_sycl_* from whisper_xpu_sycl_core.dll.
-# ═════════════════════════════════════════════════════════════════════
-
-add_library(whisper_xpu_cpu_core SHARED
-    engine.cpp
-    merge_segments.cpp
-)
-
-target_compile_definitions(whisper_xpu_cpu_core PRIVATE
-    WHISPER_XPU_BUILD_MAIN_LIB
-    WHISPER_XPU_BUILD_SHARED_LIBS
-    WHISPER_XPU_HAS_SYCL
-)
-
-target_include_directories(whisper_xpu_cpu_core PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
-target_include_directories(whisper_xpu_cpu_core PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/sycl_src
-    ${CMAKE_SOURCE_DIR}/third_party/whisper.cpp/include
-    ${CMAKE_SOURCE_DIR}/third_party/whisper.cpp/ggml/include
-)
-
-# MSVC compile options
-target_compile_options(whisper_xpu_cpu_core PRIVATE
-    $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
-)
-
-# ── Dependencies ──
-# whisper + ggml are linked statically (symbols resolved at link time,
-# not re-exported from this DLL).
-target_link_libraries(whisper_xpu_cpu_core PUBLIC whisper)
-
-# Import ggml_backend_sycl_* and device_detect symbols from the SYCL DLL.
-target_link_libraries(whisper_xpu_cpu_core PRIVATE whisper_xpu_sycl_core)
-
-if(WIN32)
-    target_link_libraries(whisper_xpu_cpu_core PRIVATE winmm)
-endif()
 
 # ═════════════════════════════════════════════════════════════════════
 # xpu_device_prop.dll — reference probe (icpx, SHARED)
@@ -170,12 +137,6 @@ if(SYCL_LIBRARY_DIR)
 endif()
 target_link_libraries(xpu_device_prop PRIVATE sycl)
 
-# Delay-load sycl8.dll so the probe DLL can be loaded before
-# ZES_ENABLE_SYSMAN=1 — only triggers sycl8.dll on first SYCL call.
-if(WIN32)
-    target_link_options(xpu_device_prop PRIVATE /DELAYLOAD:sycl8.dll)
-    target_link_libraries(xpu_device_prop PRIVATE delayimp)
-endif()
 
 # Copy to app output dir
 add_custom_command(TARGET xpu_device_prop POST_BUILD

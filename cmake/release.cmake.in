@@ -15,14 +15,10 @@ file(COPY "${SRC_DIR}/whisper-xpu-core/whisper_xpu_core.h" DESTINATION "${REL_DI
 file(COPY "${SRC_DIR}/whisper-xpu-core/export.h"           DESTINATION "${REL_DIR}/include")
 
 # ── Import libraries (for downstream consumers) ──
-file(COPY "${BIN_DIR}/whisper-xpu-core/${CFG}/whisper_xpu_cpu_core.lib"
-     DESTINATION "${REL_DIR}/lib")
 file(COPY "${BIN_DIR}/whisper-xpu-core/${CFG}/whisper_xpu_sycl_core.lib"
      DESTINATION "${REL_DIR}/lib")
 
 # ── DLLs ──
-file(COPY "${BIN_DIR}/whisper-xpu-core/${CFG}/whisper_xpu_cpu_core.dll"
-     DESTINATION "${REL_DIR}/bin")
 file(COPY "${BIN_DIR}/whisper-xpu-core/${CFG}/whisper_xpu_sycl_core.dll"
      DESTINATION "${REL_DIR}/bin")
 
@@ -37,7 +33,12 @@ file(GLOB _rt_dlls
     "${_rt_root}/bin/svml_dispmd.dll"
     "${_rt_root}/bin/libmmd.dll"
     "${_rt_root}/bin/libiomp5md.dll"
-    "${_rt_root}/bin/ur_win_proxy_loader.dll")
+    "${_rt_root}/bin/ur_win_proxy_loader.dll"
+    "${_rt_root}/bin/ur_loader.dll"
+    "${_rt_root}/bin/ur_adapter_level_zero*.dll"
+    "${_rt_root}/bin/ur_adapter_opencl.dll"
+    "${_rt_root}/bin/umf.dll"
+    "${_rt_root}/bin/tcm.dll")
 foreach(_d ${_rt_dlls})
     if(EXISTS "${_d}")
         file(COPY "${_d}" DESTINATION "${REL_DIR}/bin")

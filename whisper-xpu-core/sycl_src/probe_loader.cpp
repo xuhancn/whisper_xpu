@@ -9,6 +9,19 @@ int main() {
     fflush(stdout);
     SetEnvironmentVariableA("ZES_ENABLE_SYSMAN", "1");
 
+    // Mimic PyTorch: warm up sycl8.dll by loading it before any SYCL call.
+    // PyTorch's c10_xpu.dll depends on sycl8.dll, so the Windows loader
+    // resolves sycl8.dll before PyTorch calls get_platforms().
+    fprintf(stdout, "[loader] pre-loading sycl8.dll\n");
+    fflush(stdout);
+    HMODULE hSycl = LoadLibraryA("sycl8.dll");
+    if (hSycl) {
+        fprintf(stdout, "[loader] sycl8.dll loaded OK\n");
+    } else {
+        fprintf(stdout, "[loader] sycl8.dll not available, continuing anyway\n");
+    }
+    fflush(stdout);
+
     fprintf(stdout, "[loader] loading xpu_device_prop.dll\n");
     fflush(stdout);
     HMODULE h = LoadLibraryA("xpu_device_prop.dll");
@@ -20,7 +33,7 @@ int main() {
     fflush(stdout);
 
     using Fn = void (*)();
-    auto fn = (Fn)GetProcAddress(h, "print_all_device_properties_seh");
+    auto fn = (Fn)GetProcAddress(h, "print_all_device_properties");
     if (!fn) {
         fprintf(stderr, "[loader] GetProcAddress failed\n");
         FreeLibrary(h);
@@ -32,6 +45,7 @@ int main() {
     fn();
 
     fprintf(stdout, "[loader] done\n");
+    if (hSycl) FreeLibrary(hSycl);
     FreeLibrary(h);
     return 0;
 }
