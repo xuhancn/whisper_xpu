@@ -83,6 +83,11 @@ void AppFrame::CreateControls() {
     // ── 4-segment status bar ──
     CreateStatusBarFields();
 
+    // Force frame to re-layout now that the status bar exists — the panel
+    // was sized before the status bar was created, so without this the
+    // bottom of the panel may be hidden behind the status bar.
+    Layout();
+
     // ── Events ──
     m_clearBtn->Bind(wxEVT_BUTTON, &AppFrame::OnClear, this);
     m_recordBtn->Bind(wxEVT_TOGGLEBUTTON, &AppFrame::OnToggleRecord, this);
@@ -94,13 +99,13 @@ void AppFrame::CreateStatusBarFields() {
     CreateStatusBar(STATUS_FIELDS_COUNT);
 
     // Widths: negative = stretch proportional, positive = fixed px
-    int widths[STATUS_FIELDS_COUNT] = { -1, 130, -1, 50 };
+    int widths[STATUS_FIELDS_COUNT] = { -1, 130, -1, 70 };
     SetStatusWidths(STATUS_FIELDS_COUNT, widths);
 
     SetStatusText("Mic: Default",  STATUS_MIC);
     SetStatusText("Device: Auto",  STATUS_DEVICE);
     SetStatusText("No model",      STATUS_MODEL);
-    SetStatusText("...",           STATUS_SETTINGS);
+    SetStatusText("Settings...",   STATUS_SETTINGS);
 }
 
 // ──────────────────────────────────────────
@@ -119,7 +124,7 @@ void AppFrame::ShowSettingsDialog() {
     // TODO: populate from AudioCapture::enumerate_devices()
     micChoice->SetSelection(0);
     micBox->Add(micChoice, 1, wxEXPAND | wxALL, 5);
-    root->Add(micBox, 0, wxEXPAND | wxALL, 8);
+    root->Add(micBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
 
     // ── XPU Device ──
     auto* devBox = new wxStaticBoxSizer(wxHORIZONTAL, panel, "Device");
@@ -128,7 +133,7 @@ void AppFrame::ShowSettingsDialog() {
     // TODO: populate from whisper_xpu::get_available_devices()
     devChoice->SetSelection(0);
     devBox->Add(devChoice, 1, wxEXPAND | wxALL, 5);
-    root->Add(devBox, 0, wxEXPAND | wxALL, 8);
+    root->Add(devBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
 
     // ── Model path + browse ──
     auto* modelBox = new wxStaticBoxSizer(wxHORIZONTAL, panel, "Model");
@@ -147,7 +152,7 @@ void AppFrame::ShowSettingsDialog() {
             modelText->SetValue(fd.GetPath());
     });
     modelBox->Add(browseBtn, 0, wxALL, 5);
-    root->Add(modelBox, 0, wxEXPAND | wxALL, 8);
+    root->Add(modelBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
 
     // ── Record Hotkey ──
     auto* hotkeyBox = new wxStaticBoxSizer(wxHORIZONTAL, panel, "Record Hotkey");
@@ -176,18 +181,23 @@ void AppFrame::ShowSettingsDialog() {
     hotkeyBox->Add(hotkeyText, 0, wxALL, 5);
     hotkeyBox->Add(new wxStaticText(panel, wxID_ANY, "(Click field, press key)"),
                    0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-    root->Add(hotkeyBox, 0, wxEXPAND | wxALL, 8);
+    root->Add(hotkeyBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
 
     root->AddStretchSpacer();
 
     // ── OK / Cancel ──
     auto* dlgBtns = dlg.CreateButtonSizer(wxOK | wxCANCEL);
-    root->Add(dlgBtns, 0, wxALIGN_RIGHT | wxALL, 10);
+    root->Add(dlgBtns, 0, wxALIGN_RIGHT | wxBOTTOM | wxRIGHT, 10);
 
+    // Panel fills the dialog; sizer lays out the controls inside the panel.
     panel->SetSizer(root);
 
+    auto* dlgSizer = new wxBoxSizer(wxVERTICAL);
+    dlgSizer->Add(panel, 1, wxEXPAND);
+    dlg.SetSizer(dlgSizer);
+
     dlg.SetMinSize(wxSize(440, 400));
-    root->SetSizeHints(&dlg);
+    dlgSizer->SetSizeHints(&dlg);
 
     if (dlg.ShowModal() == wxID_OK) {
         // Stub — save settings for future wiring
@@ -205,7 +215,7 @@ void AppFrame::ShowSettingsDialog() {
 void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
     if (m_recording) {
         // ── Stop recording ──
-        m_recordBtn->SetLabel("⏺  Record");
+        m_recordBtn->SetLabel("Record");
         m_recordBtn->SetValue(false);
         SetStatusText("Mic: Default", STATUS_MIC);
 
@@ -215,9 +225,9 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
     } else {
         // ── Start recording ──
         // TODO: check engine loaded, start AudioCapture, spawn thread
-        m_recordBtn->SetLabel("⏹  Stop");
+        m_recordBtn->SetLabel("Stop");
         m_recordBtn->SetValue(true);
-        SetStatusText("🔴 Recording...", STATUS_MIC);
+        SetStatusText("Recording...", STATUS_MIC);
 
         m_recording = true;
     }
