@@ -12,7 +12,7 @@ enum class DeviceClass { CPU, GPU_Integrated, GPU_Discrete, Unknown };
 
 namespace whisper_xpu {
 
-struct WHISPER_XPU_API DeviceInfo {
+struct WHISPER_XPU_SYCL_API DeviceInfo {
     int         index;
     DeviceClass device_class;
     std::string name;
@@ -23,8 +23,8 @@ struct WHISPER_XPU_API DeviceInfo {
     std::string to_string() const;
 };
 
-std::vector<DeviceInfo> get_available_devices();
-bool has_intel_gpu();
-DeviceInfo get_device_info(int device_index);
+WHISPER_XPU_SYCL_API std::vector<DeviceInfo> get_available_devices();
+WHISPER_XPU_SYCL_API bool has_intel_gpu();
+WHISPER_XPU_SYCL_API DeviceInfo get_device_info(int device_index);
 
 } // namespace whisper_xpu

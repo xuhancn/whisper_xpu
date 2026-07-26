@@ -1,5 +1,7 @@
 ﻿#include <wx/wx.h>
 #include <wx/intl.h>
+#include <wx/evtloop.h>
+#include <cstdlib>
 #include "app_frame.h"
 // included via whisper_xpu_core.h
 
@@ -7,6 +9,18 @@ class WhisperApp : public wxApp {
     wxLocale m_locale;
 public:
     virtual bool OnInit() override {
+        // The SYCL/oneMKL init path inside the merged core library can
+        // crash with a null function pointer (sycl::platform::get_platforms)
+        // when the Intel GPU driver / Level Zero loader doesn't match the
+        // oneAPI runtime version.  We work around this by deferring ALL
+        // SYCL calls until after the event loop starts — that way the
+        // wxWindow is visible and a crash doesn't look like a hang.
+
+        // Set env var required by Level Zero for sysman function pointers.
+#ifdef _WIN32
+        _putenv_s("ZES_ENABLE_SYSMAN", "1");
+#endif
+
         m_locale.Init(wxLANGUAGE_DEFAULT);
         wxString model_path;
         int device_index = kDeviceAuto;
@@ -31,10 +45,8 @@ public:
             }
         }
 
-        // Note: SYCL runtime init (get_available_devices) is deferred to avoid
-        // access-violation crashes when the SYCL runtime isn't fully set up
-        // (e.g. missing Intel GPU driver or Level Zero loader). The settings
-        // dialog will enumerate devices when opened.
+        // ZES_ENABLE_SYSMAN=1 is set above — required by the Level Zero
+        // loader to avoid a null-function-pointer crash in get_platforms().
 
         AppFrame* frame = new AppFrame(
             "Whisper XPU",

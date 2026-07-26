@@ -77,47 +77,6 @@ static bool load_wav(const std::string& path, std::vector<float>& out, int expec
 }
 
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-
-// moved to merge_segments.cpp
-std::string merge_segments(const std::vector<const char*>& segments) {
-    std::string result;
-    for (size_t i = 0; i < segments.size(); i++) {
-        if (!segments[i]) continue;
-        std::string cur = segments[i];
-        if (cur.empty()) continue;
-
-        if (i > 0 && !result.empty()) {
-            size_t rlen = result.size(), clen = cur.size();
-
-            // exact suffix duplicate
-            if (clen <= rlen && result.compare(rlen - clen, clen, cur) == 0)
-                continue;
-
-            // partial overlap: trim matching portion from cur
-            for (size_t o = std::min(rlen, clen); o > 4; o--) {
-                if (result.compare(rlen - o, o, cur.c_str(), o) == 0) {
-                    cur = cur.substr(o);
-                    break;
-                }
-            }
-            if (cur.empty()) continue;
-        }
-        if (!result.empty() && result.back() != ' ') result += ' ';
-        result += cur;
-    }
-    return result;
-}
-
-// moved to merge_segments.cpp
-std::string merge_segments(const std::vector<std::string>& segments) {
-    std::vector<const char*> ptrs;
-    ptrs.reserve(segments.size());
-    for (const auto& s : segments) ptrs.push_back(s.c_str());
-    return merge_segments(ptrs);
-}
-
-// ---------------------------------------------------------------------------
 // PIMPL
 // ---------------------------------------------------------------------------
 
@@ -132,7 +91,8 @@ struct Engine::Impl {
     ~Impl() { if (ctx) { whisper_free(ctx); ctx=nullptr; } }
 
     bool probe_sycl_device(int dev_id) {
-#ifdef WHISPER_XPU_HAS_SYCL
+        // ggml_backend_sycl_* are imported from whisper_xpu_sycl_core.dll.
+        // The icpx-compiled DLL handles its own failures internally.
         int n = ggml_backend_sycl_get_device_count();
         if (n < 1 || dev_id >= n) return false;
         char desc[256]={0};
@@ -143,21 +103,14 @@ struct Engine::Impl {
         device_desc = os.str();
         fprintf(stderr, "[whisper-xpu] SYCL device %d: %s\n", dev_id, device_desc.c_str());
         return true;
-#else
-        (void)dev_id; return false;
-#endif
     }
 };
 
 Engine::Engine(const std::string& path, int device_id) : pimpl_(std::make_unique<Impl>()) {
     pimpl_->device_id = device_id;
     if (device_id >= 0) {
-#ifdef WHISPER_XPU_HAS_SYCL
         pimpl_->gpu_initialized = pimpl_->probe_sycl_device(device_id);
         if (!pimpl_->gpu_initialized) fprintf(stderr, "[whisper-xpu] GPU init failed\n");
-#else
-        fprintf(stderr, "[whisper-xpu] No SYCL\n");
-#endif
     }
     auto cp = whisper_context_default_params();
     cp.use_gpu = pimpl_->gpu_initialized; cp.gpu_device = device_id;

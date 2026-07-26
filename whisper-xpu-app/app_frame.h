@@ -44,6 +44,7 @@ private:
     void OnClear(wxCommandEvent& event);
     void OnCopy(wxCommandEvent& event);
     void OnStatusBarClick(wxMouseEvent& event);
+    void OnIdleInit(wxIdleEvent& event);
     void OnClose(wxCloseEvent& event);
 
     // ── UI controls ──
@@ -57,6 +58,14 @@ private:
     int         m_deviceIndex = kDeviceAuto;
     std::string m_modelPath;
     wxString    m_hotkeyStr   = "Ctrl+Shift+R";
+
+    // ── Cached lists (populated once at startup) ──
+    std::vector<whisper_xpu::DeviceInfo> m_deviceList;
+    std::vector<AudioDeviceInfo>         m_micList;
+
+    // ── Helpers ──
+    void UpdateStatusBar();
+    bool LoadEngine(const std::string& path);
 
     // ── Stubs for future engine / audio ──
     std::unique_ptr<whisper_xpu::Engine> m_engine;

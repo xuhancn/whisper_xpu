@@ -46,6 +46,17 @@ set(GGML_STATIC ON CACHE BOOL "Build ggml as static library" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
 add_subdirectory(third_party/whisper.cpp)
 
+# Remove ggml-sycl from ggml's transitive link — the SYCL backend lives
+# in whisper_xpu_sycl_core.dll exclusively.  The CPU DLL must not
+# statically link ggml-sycl or it conflicts with sycl_core imports.
+get_target_property(_ggml_iface ggml INTERFACE_LINK_LIBRARIES)
+if(_ggml_iface)
+    message(STATUS "ggml INTERFACE_LINK_LIBRARIES before filter: ${_ggml_iface}")
+    list(FILTER _ggml_iface EXCLUDE REGEX "ggml-sycl")
+    message(STATUS "ggml INTERFACE_LINK_LIBRARIES after filter:  ${_ggml_iface}")
+    set_target_properties(ggml PROPERTIES INTERFACE_LINK_LIBRARIES "${_ggml_iface}")
+endif()
+
 set(wxBUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(wxUSE_STC OFF CACHE BOOL "" FORCE)
 set(wxUSE_WEBVIEW OFF CACHE BOOL "" FORCE)
