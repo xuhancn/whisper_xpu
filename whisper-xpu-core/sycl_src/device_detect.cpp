@@ -53,12 +53,21 @@ WHISPER_XPU_SYCL_API std::vector<DeviceInfo> get_available_devices() {
     // only the AV — platform enumeration produces no C++ exceptions.
     __try {
         int gpu_count = 0;
+        std::vector<std::string> seen_names; // dedupe across backends (L0 + OpenCL)
         for (auto &p : sycl::platform::get_platforms()) {
             for (auto &d : p.get_devices(sycl::info::device_type::gpu)) {
+                std::string name = d.get_info<sycl::info::device::name>();
+                // Deduplicate by device name — the same physical GPU may
+                // appear under both Level Zero and OpenCL platforms.
+                // Level Zero is enumerated first and preferred.
+                if (std::find(seen_names.begin(), seen_names.end(), name) != seen_names.end())
+                    continue;
+                seen_names.push_back(name);
+
                 DeviceInfo inf;
                 inf.index         = gpu_count;
                 inf.device_class  = classify_device(d);
-                inf.name          = d.get_info<sycl::info::device::name>();
+                inf.name          = name;
                 inf.vendor        = d.get_info<sycl::info::device::vendor>();
                 inf.compute_units = (int)d.get_info<sycl::info::device::max_compute_units>();
                 inf.total_mem     = d.get_info<sycl::info::device::global_mem_size>();
