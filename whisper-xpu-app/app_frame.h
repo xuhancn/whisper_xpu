@@ -44,6 +44,7 @@ private:
     void OnClear(wxCommandEvent& event);
     void OnCopy(wxCommandEvent& event);
     void OnStatusBarClick(wxMouseEvent& event);
+    void OnIdleInit(wxIdleEvent& event);
     void OnClose(wxCloseEvent& event);
 
     // ── UI controls ──

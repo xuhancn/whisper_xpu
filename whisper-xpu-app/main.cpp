@@ -1,5 +1,6 @@
 ﻿#include <wx/wx.h>
 #include <wx/intl.h>
+#include <wx/evtloop.h>
 #include <cstdlib>
 #include "app_frame.h"
 // included via whisper_xpu_core.h
@@ -8,9 +9,14 @@ class WhisperApp : public wxApp {
     wxLocale m_locale;
 public:
     virtual bool OnInit() override {
-        // Level Zero sysman must be enabled before any SYCL call or the
-        // runtime hits a null function pointer in ze_loader.dll during
-        // platform enumeration.
+        // The SYCL/oneMKL init path inside the merged core library can
+        // crash with a null function pointer (sycl::platform::get_platforms)
+        // when the Intel GPU driver / Level Zero loader doesn't match the
+        // oneAPI runtime version.  We work around this by deferring ALL
+        // SYCL calls until after the event loop starts — that way the
+        // wxWindow is visible and a crash doesn't look like a hang.
+
+        // Set env var required by Level Zero for sysman function pointers.
 #ifdef _WIN32
         _putenv_s("ZES_ENABLE_SYSMAN", "1");
 #endif

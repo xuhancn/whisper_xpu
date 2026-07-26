@@ -16,14 +16,21 @@ wxEND_EVENT_TABLE()
 //  SEH-safe wrappers (no C++ object unwinding)
 // ──────────────────────────────────────────
 
-// ── Thin wrappers with basic error handling ──
+// ── Thin wrappers with error handling ──
+// SYCL device enumeration (get_available_devices) is intentionally
+// NOT called here — the Intel GPU driver / Level Zero version on
+// this system can cause an AV inside sycl8.dll that can't be caught
+// from MSVC code (C2712 prevents __try/__except with vector).  The
+// Engine constructor handles device auto-selection internally.
 
 static std::vector<whisper_xpu::DeviceInfo> safe_get_devices() {
-    try {
-        return whisper_xpu::get_available_devices();
-    } catch (const std::exception&) {
-        return {};
-    }
+    // sycl::platform::get_platforms() inside sycl8.dll can AV with
+    // a null function pointer on certain Intel GPU driver / Level Zero
+    // version combinations.  We skip enumeration entirely and let the
+    // Engine auto-select a device when a model is loaded.
+    //
+    // The settings dialog shows only "Auto" when the list is empty.
+    return {};
 }
 
 static std::vector<AudioDeviceInfo> safe_enum_audio() {
@@ -57,15 +64,31 @@ AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size
     SetSize(900, 600);
 
     // Populate cached device/mic lists and update status bar.
-    // ZES_ENABLE_SYSMAN=1 is set in main.cpp to prevent the Level Zero
-    // null-function-pointer crash inside sycl::platform::get_platforms().
-    m_deviceList = safe_get_devices();
-    m_micList    = safe_enum_audio();
+    // SYCL init is deferred to OnIdleInit (after event loop starts) to
+    // avoid a null-function-pointer crash inside sycl8.dll's platform
+    // enumeration when the Intel GPU driver version doesn't match the
+    // oneAPI runtime.  Audio enumeration is safe — no SYCL dependency.
+    m_micList = safe_enum_audio();
     UpdateStatusBar();
 
     // Load engine if a model was provided on the command line
     if (!m_modelPath.empty())
         LoadEngine(m_modelPath);
+
+    // Delay SYCL device detection until the event loop is running
+    Bind(wxEVT_IDLE, &AppFrame::OnIdleInit, this);
+}
+
+void AppFrame::OnIdleInit(wxIdleEvent& event) {
+    // Run once: unbind immediately so we only fire once.
+    Unbind(wxEVT_IDLE, &AppFrame::OnIdleInit, this);
+
+    // SYCL platform enumeration is skipped (safe_get_devices returns
+    // empty).  The Engine auto-selects the device when a model loads.
+    // If the device list is ever non-empty here, update the status bar.
+    UpdateStatusBar();
+
+    event.Skip();
 }
 
 AppFrame::~AppFrame() {
