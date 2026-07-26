@@ -126,16 +126,72 @@ target_compile_options(whisper_xpu_cpu_core PRIVATE
 target_link_libraries(whisper_xpu_cpu_core PUBLIC whisper)
 
 # Import ggml_backend_sycl_* and device_detect symbols from the SYCL DLL.
-# /DELAYLOAD so the SYCL DLL doesn't load at process startup — ZES_ENABLE_SYSMAN
-# must be set first (done in main.cpp before any SYCL call).
 target_link_libraries(whisper_xpu_cpu_core PRIVATE whisper_xpu_sycl_core)
-if(WIN32)
-    target_link_options(whisper_xpu_cpu_core PRIVATE
-        /DELAYLOAD:whisper_xpu_sycl_core.dll
-    )
-    target_link_libraries(whisper_xpu_cpu_core PRIVATE delayimp)
-endif()
 
 if(WIN32)
     target_link_libraries(whisper_xpu_cpu_core PRIVATE winmm)
 endif()
+
+# ═════════════════════════════════════════════════════════════════════
+# xpu_device_prop.dll — reference probe (icpx, SHARED)
+#   Exact match of xpu_kernel_optimizer/projection/scripts/CMakeLists.txt
+#   Source: xpuDeviceProp.cpp (zero modifications)
+# ═════════════════════════════════════════════════════════════════════
+
+add_library(xpu_device_prop SHARED
+    sycl_src/xpuDeviceProp.cpp       # unmodified reference code
+    sycl_src/xpu_probe_seh.cpp       # SEH wrapper — calls the above safely
+)
+target_compile_options(xpu_device_prop PRIVATE -fsycl)
+target_link_options(xpu_device_prop PRIVATE -fsycl)
+set_target_properties(xpu_device_prop PROPERTIES
+    LINKER_LANGUAGE CXX
+    PREFIX ""
+    # Force icpx (clang-based SYCL compiler) — matches original project
+    CXX_COMPILER "icpx"
+)
+
+target_include_directories(xpu_device_prop PRIVATE
+    ${SYCL_INCLUDE_DIR}
+)
+
+if(WIN32 AND CMAKE_GENERATOR MATCHES "Visual Studio")
+    if(DEFINED ENV{DNNL_INTEL_TOOLSET})
+        set_target_properties(xpu_device_prop PROPERTIES
+            VS_PLATFORM_TOOLSET "$ENV{DNNL_INTEL_TOOLSET}")
+    else()
+        set_target_properties(xpu_device_prop PROPERTIES
+            VS_PLATFORM_TOOLSET "Intel C++ Compiler 2025")
+    endif()
+endif()
+
+if(SYCL_LIBRARY_DIR)
+    target_link_directories(xpu_device_prop PRIVATE ${SYCL_LIBRARY_DIR})
+endif()
+target_link_libraries(xpu_device_prop PRIVATE sycl)
+
+# Delay-load sycl8.dll so the probe DLL can be loaded before
+# ZES_ENABLE_SYSMAN=1 — only triggers sycl8.dll on first SYCL call.
+if(WIN32)
+    target_link_options(xpu_device_prop PRIVATE /DELAYLOAD:sycl8.dll)
+    target_link_libraries(xpu_device_prop PRIVATE delayimp)
+endif()
+
+# Copy to app output dir
+add_custom_command(TARGET xpu_device_prop POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:xpu_device_prop>
+        $<TARGET_FILE_DIR:whisper_xpu_app>
+    COMMENT "Copying xpu_device_prop.dll to app output directory"
+)
+
+# Loader EXE (MSVC, no SYCL) — sets ZES_ENABLE_SYSMAN then LoadLibrary
+add_executable(xpu_probe_loader sycl_src/probe_loader.cpp)
+target_compile_options(xpu_probe_loader PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+add_custom_command(TARGET xpu_probe_loader POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:xpu_probe_loader>
+        $<TARGET_FILE_DIR:whisper_xpu_app>
+    COMMENT "Copying xpu_probe_loader.exe to app output directory"
+)

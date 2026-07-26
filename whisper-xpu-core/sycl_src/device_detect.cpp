@@ -47,20 +47,28 @@ WHISPER_XPU_SYCL_API std::vector<DeviceInfo> get_available_devices() {
     list.push_back(cpu);
 
 #ifdef WHISPER_XPU_HAS_SYCL
-    int gpu_count = 0;
-    for (auto &p : sycl::platform::get_platforms()) {
-        for (auto &d : p.get_devices(sycl::info::device_type::gpu)) {
-            DeviceInfo inf;
-            inf.index         = gpu_count;
-            inf.device_class  = classify_device(d);
-            inf.name          = d.get_info<sycl::info::device::name>();
-            inf.vendor        = d.get_info<sycl::info::device::vendor>();
-            inf.compute_units = (int)d.get_info<sycl::info::device::max_compute_units>();
-            inf.total_mem     = d.get_info<sycl::info::device::global_mem_size>();
-            inf.free_mem      = 0;
-            list.push_back(inf);
-            ++gpu_count;
+    // SEH: sycl::platform::get_platforms() can AV inside sycl8.dll
+    // on broken GPU driver / oneAPI version combos.  icpx supports
+    // __try with C++ objects (no MSVC C2712).  __except(1) catches
+    // only the AV — platform enumeration produces no C++ exceptions.
+    __try {
+        int gpu_count = 0;
+        for (auto &p : sycl::platform::get_platforms()) {
+            for (auto &d : p.get_devices(sycl::info::device_type::gpu)) {
+                DeviceInfo inf;
+                inf.index         = gpu_count;
+                inf.device_class  = classify_device(d);
+                inf.name          = d.get_info<sycl::info::device::name>();
+                inf.vendor        = d.get_info<sycl::info::device::vendor>();
+                inf.compute_units = (int)d.get_info<sycl::info::device::max_compute_units>();
+                inf.total_mem     = d.get_info<sycl::info::device::global_mem_size>();
+                inf.free_mem      = 0;
+                list.push_back(inf);
+                ++gpu_count;
+            }
         }
+    } __except(1) {
+        // sycl8.dll crashed — return CPU-only
     }
 #endif
     return list;

@@ -16,7 +16,7 @@ target_include_directories(whisper_xpu_app PRIVATE
 )
 
 target_compile_options(whisper_xpu_app PRIVATE
-    $<$<CXX_COMPILER_ID:MSVC>:/utf-8 /EHa>)
+    $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 
 target_link_libraries(whisper_xpu_app PRIVATE
     whisper_xpu_cpu_core
@@ -24,15 +24,6 @@ target_link_libraries(whisper_xpu_app PRIVATE
     wx::core
     portaudio
 )
-
-# Delay-load the SYCL DLL — if sycl8.dll is absent the app still
-# starts, and device enumeration returns empty (CPU-only).
-if(WIN32)
-    target_link_options(whisper_xpu_app PRIVATE
-        /DELAYLOAD:whisper_xpu_sycl_core.dll
-    )
-    target_link_libraries(whisper_xpu_app PRIVATE delayimp)
-endif()
 
 if(WIN32)
     target_link_libraries(whisper_xpu_app PRIVATE
