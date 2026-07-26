@@ -7,4 +7,4 @@ target_compile_definitions(bench_vad PRIVATE
     TEST_WAV_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     VAD_MODEL_DIR="${CMAKE_SOURCE_DIR}/models/vad_model"
 )
-target_link_libraries(bench_vad PRIVATE whisper_xpu_cpu_core whisper_xpu_sycl_core)
+target_link_libraries(bench_vad PRIVATE whisper_xpu_sycl_core)

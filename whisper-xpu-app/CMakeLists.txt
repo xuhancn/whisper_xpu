@@ -19,7 +19,6 @@ target_compile_options(whisper_xpu_app PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 
 target_link_libraries(whisper_xpu_app PRIVATE
-    whisper_xpu_cpu_core
     whisper_xpu_sycl_core
     wx::core
     portaudio
@@ -35,15 +34,12 @@ if(WIN32)
     )
 endif()
 
-# ── Copy DLLs next to the executable ──
+# ── Copy project DLL next to the executable ──
 add_custom_command(TARGET whisper_xpu_app POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:whisper_xpu_cpu_core>
-        $<TARGET_FILE_DIR:whisper_xpu_app>
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         $<TARGET_FILE:whisper_xpu_sycl_core>
         $<TARGET_FILE_DIR:whisper_xpu_app>
-    COMMENT "Copying project DLLs to app output directory"
+    COMMENT "Copying whisper_xpu_sycl_core.dll to app output directory"
 )
 
 # ── Copy Intel oneAPI runtime DLLs ──
@@ -52,7 +48,16 @@ add_custom_command(TARGET whisper_xpu_app POST_BUILD
 # and must be present on the target system for GPU functionality.
 if(WIN32 AND SYCL_LIBRARY_DIR)
     get_filename_component(_sycl_bin "${SYCL_LIBRARY_DIR}/../bin" ABSOLUTE)
-    set(_rt_dlls sycl8.dll svml_dispmd.dll libmmd.dll libiomp5md.dll ur_win_proxy_loader.dll)
+    set(_rt_dlls sycl8.dll svml_dispmd.dll libmmd.dll libiomp5md.dll
+        ur_win_proxy_loader.dll ur_loader.dll
+        ur_adapter_level_zero.dll ur_adapter_opencl.dll
+        umf.dll tcm.dll)
+    # Optional DLLs — may not exist in older oneAPI releases
+    foreach(_opt_dll ur_adapter_level_zero_v2.dll libhwloc-15.dll)
+        if(EXISTS "${_sycl_bin}/${_opt_dll}")
+            list(APPEND _rt_dlls ${_opt_dll})
+        endif()
+    endforeach()
     foreach(_dll ${_rt_dlls})
         add_custom_command(TARGET whisper_xpu_app POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different

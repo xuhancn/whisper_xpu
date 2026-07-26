@@ -3,17 +3,13 @@
 // ──────────────────────────────────────────────────────────────────────────────
 // DLL export/import macros for whisper_xpu_core.
 //
-// The project builds two DLLs:
-//   1. whisper_xpu_cpu_core.dll  (MSVC) — Engine, merge, no SYCL
-//   2. whisper_xpu_sycl_core.dll (icpx) — device_detect, ggml-sycl, oneDNN
+// The project builds a single core DLL:
+//   whisper_xpu_sycl_core.dll (icpx) — engine, device_detect, ggml-sycl, oneDNN
 //
-// For the CPU DLL:
-//   Library build  (WHISPER_XPU_BUILD_MAIN_LIB):  WHISPER_XPU_API → dllexport
-//   Consumer build:                               WHISPER_XPU_API → dllimport
-//
-// For the SYCL DLL:
-//   Library build  (WHISPER_XPU_BUILD_SYCL_LIB):  WHISPER_XPU_SYCL_API → dllexport
-//   Consumer build:                               WHISPER_XPU_SYCL_API → dllimport
+// Two export tiers:
+//   WHISPER_XPU_SYCL_API — device_detect symbols (WHISPER_XPU_BUILD_SYCL_LIB)
+//   WHISPER_XPU_API       — Engine, merge_segments symbols (WHISPER_XPU_BUILD_MAIN_LIB)
+//   Both are dllexport when building the DLL, dllimport for consumers.
 //
 // When WHISPER_XPU_BUILD_SHARED_LIBS is not defined (static build):
 //   Both macros are empty — no export/import annotations needed.
@@ -22,7 +18,7 @@
 #ifdef _WIN32
   #define WHISPER_XPU_HIDDEN
 
-  // ── CPU DLL (WHISPER_XPU_BUILD_MAIN_LIB) ──
+  // ── Engine / merge_segments API (WHISPER_XPU_BUILD_MAIN_LIB) ──
   #ifdef WHISPER_XPU_BUILD_SHARED_LIBS
     #ifdef WHISPER_XPU_BUILD_MAIN_LIB
       #define WHISPER_XPU_API __declspec(dllexport)
@@ -33,7 +29,7 @@
     #define WHISPER_XPU_API
   #endif
 
-  // ── SYCL DLL (WHISPER_XPU_BUILD_SYCL_LIB) ──
+  // ── device_detect API (WHISPER_XPU_BUILD_SYCL_LIB) ──
   #ifdef WHISPER_XPU_BUILD_SHARED_LIBS
     #ifdef WHISPER_XPU_BUILD_SYCL_LIB
       #define WHISPER_XPU_SYCL_API __declspec(dllexport)
