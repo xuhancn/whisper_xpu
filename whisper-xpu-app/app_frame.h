@@ -7,7 +7,6 @@
 #include <wx/clipbrd.h>
 #include <memory>
 #include <atomic>
-#include <thread>
 #include "device_detect.h"
 #include "audio_capture.h"
 
@@ -17,6 +16,7 @@ namespace whisper_xpu {
 }
 
 class AudioCapture;
+class AudioStream;
 
 // ── Status bar field indices ──
 // Layout: [Mic info       ] [Device     ] [Model           ] [⚙]
@@ -67,11 +67,10 @@ private:
     void UpdateStatusBar();
     bool LoadEngine(const std::string& path);
 
-    // ── Stubs for future engine / audio ──
+    // ── Engine / audio ──
     std::unique_ptr<whisper_xpu::Engine> m_engine;
-    std::unique_ptr<AudioCapture>        m_audioCapture;
+    std::unique_ptr<AudioStream>        m_audioStream;
     std::atomic<bool> m_recording{false};
-    std::thread       m_audioThread;
 
     wxDECLARE_EVENT_TABLE();
 };
