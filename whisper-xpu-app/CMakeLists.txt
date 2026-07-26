@@ -16,7 +16,7 @@ target_include_directories(whisper_xpu_app PRIVATE
 )
 
 target_compile_options(whisper_xpu_app PRIVATE
-    $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+    $<$<CXX_COMPILER_ID:MSVC>:/utf-8 /EHa>)
 
 target_link_libraries(whisper_xpu_app PRIVATE
     whisper_xpu_core

@@ -13,6 +13,44 @@ wxBEGIN_EVENT_TABLE(AppFrame, wxFrame)
 wxEND_EVENT_TABLE()
 
 // ──────────────────────────────────────────
+//  SEH-safe wrappers (no C++ object unwinding)
+// ──────────────────────────────────────────
+
+// Wraps get_available_devices() — SYCL can AV if runtime is broken.
+// SEH-to-C++ translator: enables catch(...) to trap access violations.
+// Activated by /EHa compile flag set in CMakeLists.txt.
+static void seh_translator(unsigned int /*code*/, EXCEPTION_POINTERS* /*info*/) {
+    throw std::runtime_error("SEH exception (access violation)");
+}
+
+static std::vector<whisper_xpu::DeviceInfo> safe_get_devices() {
+    _set_se_translator(seh_translator);
+    try {
+        return whisper_xpu::get_available_devices();
+    } catch (...) {
+        return {};
+    }
+}
+
+static std::vector<AudioDeviceInfo> safe_enum_audio() {
+    _set_se_translator(seh_translator);
+    try {
+        return AudioCapture::enumerate_devices();
+    } catch (...) {
+        return {};
+    }
+}
+
+static whisper_xpu::Engine* safe_create_engine(const std::string& path, int device) {
+    _set_se_translator(seh_translator);
+    try {
+        return new whisper_xpu::Engine(path, device);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+// ──────────────────────────────────────────
 //  Construction / Destruction
 // ──────────────────────────────────────────
 
@@ -26,9 +64,11 @@ AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size
     SetMinSize(wxSize(600, 350));
     SetSize(900, 600);
 
-    // Populate cached device/mic lists and update status bar
-    m_deviceList = whisper_xpu::get_available_devices();
-    m_micList    = AudioCapture::enumerate_devices();
+    // Populate cached device/mic lists and update status bar.
+    // SYCL/PortAudio calls are wrapped with SEH (safe_* helpers) because
+    // they can AV if the runtime or driver is missing/broken.
+    m_deviceList = safe_get_devices();
+    m_micList    = safe_enum_audio();
     UpdateStatusBar();
 
     // Load engine if a model was provided on the command line
@@ -172,17 +212,16 @@ bool AppFrame::LoadEngine(const std::string& path) {
         m_recordBtn->SetLabel("Record");
         m_recordBtn->SetValue(false);
     }
-    try {
-        m_engine = std::make_unique<whisper_xpu::Engine>(path, m_deviceIndex);
-        m_modelPath = path;
-        UpdateStatusBar();
-        return true;
-    } catch (const std::exception& e) {
-        wxMessageBox("Failed to load model:\n" + wxString(e.what()),
+    m_engine.reset(safe_create_engine(path, m_deviceIndex));
+    if (!m_engine) {
+        wxMessageBox("Failed to initialize engine: SYCL runtime error.\n"
+                     "Make sure the Intel GPU driver and oneAPI runtime are installed.",
                      "Error", wxOK | wxICON_ERROR);
-        m_engine.reset();
         return false;
     }
+    m_modelPath = path;
+    UpdateStatusBar();
+    return true;
 }
 
 // ──────────────────────────────────────────
