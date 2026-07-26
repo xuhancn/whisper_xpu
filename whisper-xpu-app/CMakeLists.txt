@@ -2,7 +2,7 @@ add_executable(whisper_xpu_app WIN32
     main.cpp
     app_frame.cpp
     audio_capture.cpp
-    src/audio_stream.cpp
+    src/audio_recorder.cpp
 )
 
 target_include_directories(whisper_xpu_app PRIVATE

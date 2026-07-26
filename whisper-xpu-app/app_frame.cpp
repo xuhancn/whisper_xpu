@@ -2,7 +2,7 @@
 #include "whisper_xpu_core.h"
 #include "device_detect.h"
 #include "audio_capture.h"
-#include "src/audio_stream.h"
+#include "src/audio_recorder.h"
 
 #include <wx/filedlg.h>
 #include <wx/msgdlg.h>
@@ -85,8 +85,8 @@ void AppFrame::OnIdleInit(wxIdleEvent& event) {
 }
 
 AppFrame::~AppFrame() {
-    if (m_recording && m_audioStream)
-        m_audioStream->stop();
+    if (m_recording && m_recorder)
+        m_recorder->stop();
 }
 
 // ──────────────────────────────────────────
@@ -121,9 +121,9 @@ void AppFrame::CreateControls() {
     m_clearBtn->SetToolTip("Clear all transcription text");
     btnSizer->Add(m_clearBtn, 0, wxRIGHT, 8);
 
-    m_recordBtn = new wxToggleButton(panel, wxID_ANY, "Record");
+    m_recordBtn = new wxButton(panel, wxID_ANY, "Record");
     m_recordBtn->SetMinSize(wxSize(100, 32));
-    m_recordBtn->SetToolTip("Start / stop recording (toggle)");
+    m_recordBtn->SetToolTip("Start / stop recording");
     btnSizer->Add(m_recordBtn, 0, wxRIGHT, 8);
 
     m_copyBtn = new wxButton(panel, wxID_ANY, "Copy");
@@ -145,7 +145,7 @@ void AppFrame::CreateControls() {
 
     // ── Events ──
     m_clearBtn->Bind(wxEVT_BUTTON, &AppFrame::OnClear, this);
-    m_recordBtn->Bind(wxEVT_TOGGLEBUTTON, &AppFrame::OnToggleRecord, this);
+    m_recordBtn->Bind(wxEVT_BUTTON, &AppFrame::OnToggleRecord, this);
     m_copyBtn->Bind(wxEVT_BUTTON, &AppFrame::OnCopy, this);
     GetStatusBar()->Bind(wxEVT_LEFT_DOWN, &AppFrame::OnStatusBarClick, this);
 }
@@ -226,11 +226,10 @@ void AppFrame::UpdateStatusBar() {
 }
 
 bool AppFrame::LoadEngine(const std::string& path) {
-    if (m_recording && m_audioStream) {
-        m_audioStream->stop();
+    if (m_recording && m_recorder) {
+        m_recorder->stop();
         m_recording = false;
         m_recordBtn->SetLabel("Record");
-        m_recordBtn->SetValue(false);
     }
     m_engine.reset(safe_create_engine(path, m_deviceIndex));
     if (!m_engine) {
@@ -410,33 +409,38 @@ void AppFrame::ShowSettingsDialog() {
 // ──────────────────────────────────────────
 
 void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
-    if (m_recording) {
-        // ── Stop recording ──
-        if (m_audioStream)
-            m_audioStream->stop();
-        m_audioStream.reset();
+    // CallAfter coalesces duplicate events into one.
+    CallAfter([this]() {
+        if (!m_recording) {
+            // ── Start ──
+            if (!m_engine) {
+                wxMessageBox("Please load a model first (Settings).",
+                             "No Model", wxOK | wxICON_INFORMATION);
+                return;
+            }
 
-        m_recordBtn->SetLabel("Record");
-        m_recordBtn->SetValue(false);
-        SetStatusText("Mic: Default", STATUS_MIC);
-        m_recording = false;
-    } else {
-        // ── Start recording ──
-        if (!m_engine) {
-            wxMessageBox("Please load a model first (Settings).",
-                         "No Model", wxOK | wxICON_INFORMATION);
-            m_recordBtn->SetValue(false);
-            return;
+            auto on_text = [this](const std::string& text) {
+                m_transcriptText->CallAfter([this, text]() {
+                    m_transcriptText->WriteText(wxString(text) + wxT(" "));
+                });
+            };
+
+            m_recorder = std::make_unique<AudioRecorder>(m_engine.get(), on_text);
+            m_recorder->start(m_micIndex);
+
+            m_recordBtn->SetLabel("Stop");
+            SetStatusText("Recording...", STATUS_MIC);
+            m_recording = true;
+        } else {
+            // ── Stop ──
+            if (m_recorder) m_recorder->stop();
+            m_recorder.reset();
+
+            m_recordBtn->SetLabel("Record");
+            SetStatusText("Mic: Default", STATUS_MIC);
+            m_recording = false;
         }
-
-        m_audioStream = std::make_unique<AudioStream>(m_engine.get(), m_transcriptText);
-        m_audioStream->start(m_micIndex);
-
-        m_recordBtn->SetLabel("Stop");
-        m_recordBtn->SetValue(true);
-        SetStatusText("Recording...", STATUS_MIC);
-        m_recording = true;
-    }
+    });
 }
 
 void AppFrame::OnClear(wxCommandEvent& WXUNUSED(event)) {
@@ -465,9 +469,9 @@ void AppFrame::OnStatusBarClick(wxMouseEvent& ev) {
 }
 
 void AppFrame::OnClose(wxCloseEvent& event) {
-    if (m_recording && m_audioStream)
-        m_audioStream->stop();
-    m_audioStream.reset();
+    if (m_recording && m_recorder)
+        m_recorder->stop();
+    m_recorder.reset();
     m_engine.reset();
     event.Skip();
 }
