@@ -24,6 +24,14 @@ target_link_libraries(whisper_xpu_app PRIVATE
     portaudio
 )
 
+# Delay-load sycl8.dll so we can set ZES_ENABLE_SYSMAN=1 before the
+# SYCL runtime initializes (required by Level Zero loader on some
+# Intel GPU driver versions to avoid a null-function-pointer crash).
+if(WIN32)
+    target_link_options(whisper_xpu_app PRIVATE /DELAYLOAD:sycl8.dll)
+    target_link_libraries(whisper_xpu_app PRIVATE delayimp)
+endif()
+
 if(WIN32)
     target_link_libraries(whisper_xpu_app PRIVATE
         winmm

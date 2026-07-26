@@ -1,5 +1,6 @@
 ﻿#include <wx/wx.h>
 #include <wx/intl.h>
+#include <cstdlib>
 #include "app_frame.h"
 // included via whisper_xpu_core.h
 
@@ -7,6 +8,13 @@ class WhisperApp : public wxApp {
     wxLocale m_locale;
 public:
     virtual bool OnInit() override {
+        // Level Zero sysman must be enabled before any SYCL call or the
+        // runtime hits a null function pointer in ze_loader.dll during
+        // platform enumeration.
+#ifdef _WIN32
+        _putenv_s("ZES_ENABLE_SYSMAN", "1");
+#endif
+
         m_locale.Init(wxLANGUAGE_DEFAULT);
         wxString model_path;
         int device_index = kDeviceAuto;
@@ -31,10 +39,8 @@ public:
             }
         }
 
-        // Note: SYCL runtime init (get_available_devices) is deferred to avoid
-        // access-violation crashes when the SYCL runtime isn't fully set up
-        // (e.g. missing Intel GPU driver or Level Zero loader). The settings
-        // dialog will enumerate devices when opened.
+        // ZES_ENABLE_SYSMAN=1 is set above — required by the Level Zero
+        // loader to avoid a null-function-pointer crash in get_platforms().
 
         AppFrame* frame = new AppFrame(
             "Whisper XPU",

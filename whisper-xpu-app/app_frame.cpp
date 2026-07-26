@@ -16,36 +16,28 @@ wxEND_EVENT_TABLE()
 //  SEH-safe wrappers (no C++ object unwinding)
 // ──────────────────────────────────────────
 
-// Wraps get_available_devices() — SYCL can AV if runtime is broken.
-// SEH-to-C++ translator: enables catch(...) to trap access violations.
-// Activated by /EHa compile flag set in CMakeLists.txt.
-static void seh_translator(unsigned int /*code*/, EXCEPTION_POINTERS* /*info*/) {
-    throw std::runtime_error("SEH exception (access violation)");
-}
+// ── Thin wrappers with basic error handling ──
 
 static std::vector<whisper_xpu::DeviceInfo> safe_get_devices() {
-    _set_se_translator(seh_translator);
     try {
         return whisper_xpu::get_available_devices();
-    } catch (...) {
+    } catch (const std::exception&) {
         return {};
     }
 }
 
 static std::vector<AudioDeviceInfo> safe_enum_audio() {
-    _set_se_translator(seh_translator);
     try {
         return AudioCapture::enumerate_devices();
-    } catch (...) {
+    } catch (const std::exception&) {
         return {};
     }
 }
 
 static whisper_xpu::Engine* safe_create_engine(const std::string& path, int device) {
-    _set_se_translator(seh_translator);
     try {
         return new whisper_xpu::Engine(path, device);
-    } catch (...) {
+    } catch (const std::exception&) {
         return nullptr;
     }
 }
@@ -65,8 +57,8 @@ AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size
     SetSize(900, 600);
 
     // Populate cached device/mic lists and update status bar.
-    // SYCL/PortAudio calls are wrapped with SEH (safe_* helpers) because
-    // they can AV if the runtime or driver is missing/broken.
+    // ZES_ENABLE_SYSMAN=1 is set in main.cpp to prevent the Level Zero
+    // null-function-pointer crash inside sycl::platform::get_platforms().
     m_deviceList = safe_get_devices();
     m_micList    = safe_enum_audio();
     UpdateStatusBar();

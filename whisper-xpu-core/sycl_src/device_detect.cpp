@@ -4,7 +4,6 @@
 #include <sycl/sycl.hpp>
 #include "ggml-sycl.h"
 #endif
-
 #include <sstream>
 #include <algorithm>
 #include <thread>
