@@ -124,7 +124,7 @@ void AppFrame::ShowSettingsDialog() {
     // TODO: populate from AudioCapture::enumerate_devices()
     micChoice->SetSelection(0);
     micBox->Add(micChoice, 1, wxEXPAND | wxALL, 5);
-    root->Add(micBox, 0, wxEXPAND | wxALL, 8);
+    root->Add(micBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
 
     // ── XPU Device ──
     auto* devBox = new wxStaticBoxSizer(wxHORIZONTAL, panel, "Device");
@@ -133,7 +133,7 @@ void AppFrame::ShowSettingsDialog() {
     // TODO: populate from whisper_xpu::get_available_devices()
     devChoice->SetSelection(0);
     devBox->Add(devChoice, 1, wxEXPAND | wxALL, 5);
-    root->Add(devBox, 0, wxEXPAND | wxALL, 8);
+    root->Add(devBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
 
     // ── Model path + browse ──
     auto* modelBox = new wxStaticBoxSizer(wxHORIZONTAL, panel, "Model");
@@ -152,7 +152,7 @@ void AppFrame::ShowSettingsDialog() {
             modelText->SetValue(fd.GetPath());
     });
     modelBox->Add(browseBtn, 0, wxALL, 5);
-    root->Add(modelBox, 0, wxEXPAND | wxALL, 8);
+    root->Add(modelBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
 
     // ── Record Hotkey ──
     auto* hotkeyBox = new wxStaticBoxSizer(wxHORIZONTAL, panel, "Record Hotkey");
@@ -181,18 +181,23 @@ void AppFrame::ShowSettingsDialog() {
     hotkeyBox->Add(hotkeyText, 0, wxALL, 5);
     hotkeyBox->Add(new wxStaticText(panel, wxID_ANY, "(Click field, press key)"),
                    0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-    root->Add(hotkeyBox, 0, wxEXPAND | wxALL, 8);
+    root->Add(hotkeyBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
 
     root->AddStretchSpacer();
 
     // ── OK / Cancel ──
     auto* dlgBtns = dlg.CreateButtonSizer(wxOK | wxCANCEL);
-    root->Add(dlgBtns, 0, wxALIGN_RIGHT | wxALL, 10);
+    root->Add(dlgBtns, 0, wxALIGN_RIGHT | wxBOTTOM | wxRIGHT, 10);
 
+    // Panel fills the dialog; sizer lays out the controls inside the panel.
     panel->SetSizer(root);
 
+    auto* dlgSizer = new wxBoxSizer(wxVERTICAL);
+    dlgSizer->Add(panel, 1, wxEXPAND);
+    dlg.SetSizer(dlgSizer);
+
     dlg.SetMinSize(wxSize(440, 400));
-    root->SetSizeHints(&dlg);
+    dlgSizer->SetSizeHints(&dlg);
 
     if (dlg.ShowModal() == wxID_OK) {
         // Stub — save settings for future wiring
