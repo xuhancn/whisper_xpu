@@ -83,6 +83,11 @@ void AppFrame::CreateControls() {
     // ── 4-segment status bar ──
     CreateStatusBarFields();
 
+    // Force frame to re-layout now that the status bar exists — the panel
+    // was sized before the status bar was created, so without this the
+    // bottom of the panel may be hidden behind the status bar.
+    Layout();
+
     // ── Events ──
     m_clearBtn->Bind(wxEVT_BUTTON, &AppFrame::OnClear, this);
     m_recordBtn->Bind(wxEVT_TOGGLEBUTTON, &AppFrame::OnToggleRecord, this);
@@ -94,13 +99,13 @@ void AppFrame::CreateStatusBarFields() {
     CreateStatusBar(STATUS_FIELDS_COUNT);
 
     // Widths: negative = stretch proportional, positive = fixed px
-    int widths[STATUS_FIELDS_COUNT] = { -1, 130, -1, 50 };
+    int widths[STATUS_FIELDS_COUNT] = { -1, 130, -1, 70 };
     SetStatusWidths(STATUS_FIELDS_COUNT, widths);
 
     SetStatusText("Mic: Default",  STATUS_MIC);
     SetStatusText("Device: Auto",  STATUS_DEVICE);
     SetStatusText("No model",      STATUS_MODEL);
-    SetStatusText("...",           STATUS_SETTINGS);
+    SetStatusText("Settings...",   STATUS_SETTINGS);
 }
 
 // ──────────────────────────────────────────
@@ -205,7 +210,7 @@ void AppFrame::ShowSettingsDialog() {
 void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
     if (m_recording) {
         // ── Stop recording ──
-        m_recordBtn->SetLabel("⏺  Record");
+        m_recordBtn->SetLabel("Record");
         m_recordBtn->SetValue(false);
         SetStatusText("Mic: Default", STATUS_MIC);
 
@@ -215,9 +220,9 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
     } else {
         // ── Start recording ──
         // TODO: check engine loaded, start AudioCapture, spawn thread
-        m_recordBtn->SetLabel("⏹  Stop");
+        m_recordBtn->SetLabel("Stop");
         m_recordBtn->SetValue(true);
-        SetStatusText("🔴 Recording...", STATUS_MIC);
+        SetStatusText("Recording...", STATUS_MIC);
 
         m_recording = true;
     }
