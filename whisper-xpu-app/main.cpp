@@ -9,6 +9,8 @@ class WhisperApp : public wxApp {
     wxLocale m_locale;
 public:
     virtual bool OnInit() override {
+        // Enable wxLog output to stderr for debugging
+        wxLog::SetActiveTarget(new wxLogStderr());
         // The SYCL/oneMKL init path inside the merged core library can
         // crash with a null function pointer (sycl::platform::get_platforms)
         // when the Intel GPU driver / Level Zero loader doesn't match the
