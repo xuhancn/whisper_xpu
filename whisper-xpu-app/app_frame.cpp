@@ -2,6 +2,7 @@
 #include "whisper_xpu_core.h"
 #include "device_detect.h"
 #include "audio_capture.h"
+#include "src/audio_stream.h"
 
 #include <wx/filedlg.h>
 #include <wx/msgdlg.h>
@@ -84,11 +85,8 @@ void AppFrame::OnIdleInit(wxIdleEvent& event) {
 }
 
 AppFrame::~AppFrame() {
-    if (m_recording) {
-        m_recording = false;
-        if (m_audioThread.joinable())
-            m_audioThread.join();
-    }
+    if (m_recording && m_audioStream)
+        m_audioStream->stop();
 }
 
 // ──────────────────────────────────────────
@@ -228,10 +226,9 @@ void AppFrame::UpdateStatusBar() {
 }
 
 bool AppFrame::LoadEngine(const std::string& path) {
-    if (m_recording) {
+    if (m_recording && m_audioStream) {
+        m_audioStream->stop();
         m_recording = false;
-        if (m_audioThread.joinable())
-            m_audioThread.join();
         m_recordBtn->SetLabel("Record");
         m_recordBtn->SetValue(false);
     }
@@ -415,20 +412,29 @@ void AppFrame::ShowSettingsDialog() {
 void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
     if (m_recording) {
         // ── Stop recording ──
+        if (m_audioStream)
+            m_audioStream->stop();
+        m_audioStream.reset();
+
         m_recordBtn->SetLabel("Record");
         m_recordBtn->SetValue(false);
         SetStatusText("Mic: Default", STATUS_MIC);
-
         m_recording = false;
-        if (m_audioThread.joinable())
-            m_audioThread.join();
     } else {
         // ── Start recording ──
-        // TODO: check engine loaded, start AudioCapture, spawn thread
+        if (!m_engine) {
+            wxMessageBox("Please load a model first (Settings).",
+                         "No Model", wxOK | wxICON_INFORMATION);
+            m_recordBtn->SetValue(false);
+            return;
+        }
+
+        m_audioStream = std::make_unique<AudioStream>(m_engine.get(), m_transcriptText);
+        m_audioStream->start(m_micIndex);
+
         m_recordBtn->SetLabel("Stop");
         m_recordBtn->SetValue(true);
         SetStatusText("Recording...", STATUS_MIC);
-
         m_recording = true;
     }
 }
@@ -459,12 +465,9 @@ void AppFrame::OnStatusBarClick(wxMouseEvent& ev) {
 }
 
 void AppFrame::OnClose(wxCloseEvent& event) {
-    if (m_recording) {
-        m_recording = false;
-        if (m_audioThread.joinable())
-            m_audioThread.join();
-    }
+    if (m_recording && m_audioStream)
+        m_audioStream->stop();
+    m_audioStream.reset();
     m_engine.reset();
-    m_audioCapture.reset();
     event.Skip();
 }
