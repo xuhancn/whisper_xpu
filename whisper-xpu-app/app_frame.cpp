@@ -420,8 +420,22 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
             }
 
             auto on_text = [this](const std::string& text) {
+                // Called from the merger thread → marshal to the UI thread.
+                //
+                // FromUTF8 (NOT wxString(text)): whisper emits UTF-8; on MSW
+                // wxString(std::string) converts via the system locale (GBK),
+                // mangling Chinese into mojibake.  FromUTF8 builds the wxString
+                // straight from the UTF-8 bytes so CJK renders correctly.
+                //
+                // AppendText (NOT WriteText): appends at the end, scrolls the
+                // new text into view, and repaints reliably under wxTE_RICH2
+                // on Windows — WriteText left the view stuck at the top and the
+                // control unreplainted (mic test: 312 chars emitted, UI empty).
+                // Update() forces an immediate synchronous repaint so each
+                // chunk appears right away.
                 m_transcriptText->CallAfter([this, text]() {
-                    m_transcriptText->WriteText(wxString(text) + wxT(" "));
+                    m_transcriptText->AppendText(wxString::FromUTF8(text) + wxT("\n"));
+                    m_transcriptText->Update();
                 });
             };
 
