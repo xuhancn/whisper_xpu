@@ -1,0 +1,17 @@
+# Build directories (CMake)
+build-*/
+build/
+
+# Models — large binaries, not source
+models/
+*.bin
+!third_party/**/CMakeLists.txt
+
+# Runtime logs
+*.log
+
+# Release packages
+release/
+
+# Local task planning scratch (ephemeral)
+TASKS_PLAN.md

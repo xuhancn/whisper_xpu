@@ -2,6 +2,8 @@
 #include <wx/intl.h>
 #include <wx/evtloop.h>
 #include <cstdlib>
+#include <cstdio>
+#include <io.h>
 #include "app_frame.h"
 // included via whisper_xpu_core.h
 
@@ -9,8 +11,26 @@ class WhisperApp : public wxApp {
     wxLocale m_locale;
 public:
     virtual bool OnInit() override {
-        // Enable wxLog output to stderr for debugging
-        wxLog::SetActiveTarget(new wxLogStderr());
+        // Enable wxLog output to stderr for debugging.
+        //
+        // wxLogStderr writes to stderr, but on a Windows GUI app
+        // wxAppTraits::HasStderr() returns false, so DoLogText ALSO re-emits
+        // each line via wxMessageOutputDebug — which on MSW writes stderr
+        // again.  When stderr is redirected to a file (our usual capture
+        // mode: run_app_log.bat uses `2> file`), every line ends up doubled.
+        //
+        // Fix: hand wxLogStderr a FILE* that is NOT stderr (a dup of stderr's
+        // fd, pointing at the same redirected file) so the m_fp==stderr debug
+        // re-emit branch is skipped, while output still lands in the same log.
+        // _dup fails when stderr isn't redirected (GUI app launched from
+        // Explorer) — then the ctor falls back to stderr (logs lost anyway in
+        // that mode, no regression).
+        FILE* logfp = nullptr;
+        int dupfd = _dup(_fileno(stderr));
+        if (dupfd != -1) {
+            logfp = _fdopen(dupfd, "w");
+        }
+        wxLog::SetActiveTarget(new wxLogStderr(logfp));
         // The SYCL/oneMKL init path inside the merged core library can
         // crash with a null function pointer (sycl::platform::get_platforms)
         // when the Intel GPU driver / Level Zero loader doesn't match the

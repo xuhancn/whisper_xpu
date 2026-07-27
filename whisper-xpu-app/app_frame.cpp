@@ -426,7 +426,17 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
             };
 
             m_recorder = std::make_unique<AudioRecorder>(m_engine.get(), on_text);
-            m_recorder->start(m_micIndex);
+            if (!m_recorder->start(m_micIndex)) {
+                m_recorder.reset();
+                wxMessageBox(
+                    "Could not open the microphone.\n\n"
+                    "Common causes:\n"
+                    "  - The device doesn't support 16 kHz capture (check Settings)\n"
+                    "  - Another app holds the mic exclusively\n"
+                    "  - No input device is connected",
+                    "Microphone Error", wxOK | wxICON_WARNING);
+                return;   // button stays "Record", m_recording stays false
+            }
 
             m_recordBtn->SetLabel("Stop");
             SetStatusText("Recording...", STATUS_MIC);
