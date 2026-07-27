@@ -58,27 +58,30 @@ TranscriptionScheduler::~TranscriptionScheduler() {
 }
 
 // ────────────────────────────────────────────────────────────
-// Pool creation (shared by start / start_no_capture)
+// Per-worker state creation (shared by start / start_no_capture)
 // ────────────────────────────────────────────────────────────
 
-bool TranscriptionScheduler::create_pool(const std::string& modelPath, int deviceIndex) {
+bool TranscriptionScheduler::init_states() {
     int hw = (int)std::thread::hardware_concurrency();
     if (hw < 1) hw = 4;
     m_nThreadsPerWorker = std::max(1, hw / POOL_SIZE);
 
-    m_engines.clear();
-    m_engines.reserve(POOL_SIZE);
+    m_states.clear();
+    m_workerLang.clear();
+    m_states.reserve(POOL_SIZE);
+    m_workerLang.resize(POOL_SIZE);  // empty ⇒ first window auto-detects
     for (int i = 0; i < POOL_SIZE; ++i) {
-        try {
-            m_engines.emplace_back(std::make_unique<whisper_xpu::Engine>(
-                modelPath, deviceIndex, m_nThreadsPerWorker));
-        } catch (const std::exception& e) {
-            sched_log("[Scheduler] engine %d create failed: %s", i, e.what());
-            m_engines.clear();
+        whisper_state* st = m_sharedEngine->create_state();
+        if (!st) {
+            sched_log("[Scheduler] state %d create failed — freeing partial", i);
+            for (whisper_state* s : m_states) m_sharedEngine->free_state(s);
+            m_states.clear();
+            m_workerLang.clear();
             return false;
         }
+        m_states.push_back(st);
     }
-    sched_log("[Scheduler] pool: %d engines × %d threads = %d total (hw=%d)",
+    sched_log("[Scheduler] pool: 1 shared Engine + %d states × %d threads = %d total (hw=%d)",
               POOL_SIZE, m_nThreadsPerWorker, POOL_SIZE * m_nThreadsPerWorker, hw);
     return true;
 }
@@ -87,10 +90,9 @@ bool TranscriptionScheduler::create_pool(const std::string& modelPath, int devic
 // Start (app / mic) and start_no_capture (headless / file replay)
 // ────────────────────────────────────────────────────────────
 
-bool TranscriptionScheduler::start(int micIndex, const std::string& modelPath,
-                                   int deviceIndex) {
+bool TranscriptionScheduler::start(int micIndex, whisper_xpu::Engine& sharedEngine) {
     if (m_recording) return true;
-    if (modelPath.empty()) return false;
+    m_sharedEngine = &sharedEngine;
 
     m_stopping = false;
     m_nextEmit = 0;
@@ -101,7 +103,7 @@ bool TranscriptionScheduler::start(int micIndex, const std::string& modelPath,
     m_dispatched = m_completed = m_workersUsed = 0;
     m_segsKept = m_segsDropped = 0; m_charsEmitted = 0; m_lastStopMs = 0;
 
-    if (!create_pool(modelPath, deviceIndex)) return false;
+    if (!init_states()) { m_sharedEngine = nullptr; return false; }
 
     m_capture = std::make_unique<AudioCapture>();
     m_capture->set_callback([this](const float* s, size_t n) -> size_t {
@@ -110,7 +112,12 @@ bool TranscriptionScheduler::start(int micIndex, const std::string& modelPath,
     });
     bool ok = m_capture->start(micIndex, SR, 512);
     sched_log("[Scheduler] start mic=%d ok=%d", micIndex, (int)ok);
-    if (!ok) { m_capture.reset(); m_engines.clear(); return false; }
+    if (!ok) {
+        for (whisper_state* st : m_states) m_sharedEngine->free_state(st);
+        m_states.clear(); m_workerLang.clear();
+        m_capture.reset(); m_sharedEngine = nullptr;
+        return false;
+    }
 
     m_recording = true;
     m_windowerThread = std::thread(&TranscriptionScheduler::windower_loop, this);
@@ -122,10 +129,9 @@ bool TranscriptionScheduler::start(int micIndex, const std::string& modelPath,
     return true;
 }
 
-bool TranscriptionScheduler::start_no_capture(const std::string& modelPath,
-                                              int deviceIndex) {
+bool TranscriptionScheduler::start_no_capture(whisper_xpu::Engine& sharedEngine) {
     if (m_recording) return true;
-    if (modelPath.empty()) return false;
+    m_sharedEngine = &sharedEngine;
 
     m_stopping = false;
     m_nextEmit = 0;
@@ -136,7 +142,7 @@ bool TranscriptionScheduler::start_no_capture(const std::string& modelPath,
     m_dispatched = m_completed = m_workersUsed = 0;
     m_segsKept = m_segsDropped = 0; m_charsEmitted = 0; m_lastStopMs = 0;
 
-    if (!create_pool(modelPath, deviceIndex)) return false;
+    if (!init_states()) { m_sharedEngine = nullptr; return false; }
 
     // No AudioCapture — caller feeds the ring via feed_audio().  Log so it's
     // clear in headless runs that the mic was intentionally skipped.
@@ -167,9 +173,9 @@ void TranscriptionScheduler::stop() {
     m_workerCv.notify_all();   // wake workers blocked on the queue
     m_mergerCv.notify_all();   // wake merger
 
-    // Join all threads before tearing down capture/engines so none touch
-    // `this` / m_engines after destruction.  In-flight transcribe_window
-    // aborts in ms via the abort flag.
+    // Join all threads before freeing the per-worker states so none touch
+    // `this` / m_states / the borrowed Engine after stop.  In-flight
+    // transcribe_window_with_state aborts in ms via the abort flag.
     join_thread(m_windowerThread);
     for (auto& t : m_workerThreads) join_thread(t);
     join_thread(m_mergerThread);
@@ -179,7 +185,14 @@ void TranscriptionScheduler::stop() {
         m_capture->stop();
         m_capture.reset();
     }
-    m_engines.clear();
+    // Free the per-worker states we own; the shared Engine is borrowed from
+    // the app and stays alive (one model copy for the whole session).  States
+    // must be freed only after workers have joined — done above — so none is
+    // mid-whisper_full_with_state.
+    for (whisper_state* st : m_states) m_sharedEngine->free_state(st);
+    m_states.clear();
+    m_workerLang.clear();
+    m_sharedEngine = nullptr;
     m_lastStopMs = now_ms() - t0;
     sched_log("[Scheduler] stopped (%dms)", m_lastStopMs.load());
 }
@@ -251,7 +264,6 @@ void TranscriptionScheduler::windower_loop() {
 
 void TranscriptionScheduler::worker_loop(int workerId) {
     sched_log("[Scheduler] worker %d started (n_threads=%d)", workerId, m_nThreadsPerWorker);
-    auto& engine = m_engines[workerId];
 
     while (true) {
         WindowJob job;
@@ -267,8 +279,9 @@ void TranscriptionScheduler::worker_loop(int workerId) {
         }
         m_workersUsed.fetch_or(1 << workerId);
 
-        auto r = engine->transcribe_window(job.pcm.data(), (int)job.pcm.size(),
-                                           &m_stopping);
+        auto r = m_sharedEngine->transcribe_window_with_state(
+            m_states[workerId], m_nThreadsPerWorker, m_workerLang[workerId],
+            job.pcm.data(), (int)job.pcm.size(), &m_stopping);
         const size_t segs  = r.segments.size();
         const double pms   = r.processing_time_ms;
         const bool   aborted = r.aborted;
