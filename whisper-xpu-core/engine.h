@@ -2,6 +2,7 @@
 
 #include "export.h"
 
+#include <atomic>
 #include <string>
 #include <memory>
 #include <vector>
@@ -46,7 +47,22 @@ public:
     TranscriptionResult transcribe_file(const std::string& audio_path,
                                         const VadConfig& vad = VadConfig{});
 
-    TranscriptionResult transcribe_stream(AudioSampleCallback callback);
+    // Stream transcription: repeatedly calls `callback` to pull PCM chunks
+    // (16 kHz mono) and runs whisper_full on each, accumulating text.
+    // If `abort_flag` is non-null and becomes true while a chunk is being
+    // processed, the in-flight whisper_full is aborted (via its abort/
+    // encoder-begin callbacks) and the pull loop exits promptly — so the
+    // caller's stop() doesn't block on a slow CPU chunk.
+    TranscriptionResult transcribe_stream(AudioSampleCallback callback,
+                                         const std::atomic<bool>* abort_flag = nullptr);
+
+    // Transcribe a single chunk of PCM (16 kHz mono).  Returns the chunk's
+    // text (spaces trimmed).  If `abort_flag` is non-null and set true
+    // mid-computation, whisper_full is aborted and "" is returned quickly.
+    // Used by the real-time VAD chunker (AudioRecorder) so each detected
+    // speech phrase can be transcribed and shown immediately.
+    std::string transcribe_chunk(const float* pcm, int n_samples,
+                                const std::atomic<bool>* abort_flag = nullptr);
 
     BenchmarkResult benchmark(const std::string& audio_path, const VadConfig& vad);
 

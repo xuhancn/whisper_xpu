@@ -86,6 +86,13 @@ struct Engine::Impl {
     std::string device_desc;
     int device_id = kDeviceCPU;
     int n_threads = 0;
+    // Language detected on the first streaming chunk and pinned for all
+    // subsequent chunks.  whisper pads every chunk to a 30 s window and
+    // language="auto" runs a SEPARATE encoder pass for detection — so
+    // re-detecting per chunk roughly doubles the per-chunk cost on CPU.
+    // Detecting once halves it and is the right design for a single
+    // speaker/session.  Empty ⇒ not yet detected (use "auto").
+    std::string detected_language;
 
     Impl() { n_threads = (int)std::thread::hardware_concurrency(); if (n_threads<1) n_threads=4; }
     ~Impl() { if (ctx) { whisper_free(ctx); ctx=nullptr; } }
@@ -136,7 +143,12 @@ TranscriptionResult Engine::transcribe_file(const std::string& audio_path, const
     auto wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     wp.print_realtime=false; wp.print_progress=false; wp.print_timestamps=false;
     wp.print_special=false; wp.translate=false; wp.language="auto";
-    wp.detect_language=true; wp.n_threads=pimpl_->n_threads;
+    // NOTE: detect_language must be false here.  In this whisper.cpp build
+    // detect_language=true means "detect language then return immediately
+    // without transcribing" (whisper.cpp:6845), which was the root cause of
+    // the 0-char / 0-segment output.  language="auto" still auto-detects and
+    // then proceeds to transcribe.
+    wp.detect_language=false; wp.n_threads=pimpl_->n_threads;
 
     if (vad.enabled) {
         wp.vad_model_path = vad.vad_model_path;
@@ -165,32 +177,91 @@ TranscriptionResult Engine::transcribe_file(const std::string& audio_path, const
 }
 
 // ---------------------------------------------------------------------------
+// transcribe_chunk  (single PCM block, abortable)
+// ---------------------------------------------------------------------------
+
+std::string Engine::transcribe_chunk(const float* pcm, int n_samples,
+                                     const std::atomic<bool>* abort_flag) {
+    if (!pimpl_->ctx || n_samples <= 0) return {};
+
+    auto wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+    wp.print_realtime=false; wp.print_progress=false; wp.print_timestamps=false;
+    wp.print_special=false; wp.translate=false;
+    // detect_language=false: see transcribe_file — true means detect-and-exit.
+    wp.detect_language=false; wp.n_threads=pimpl_->n_threads;
+    wp.single_segment=true; wp.no_context=true; wp.no_timestamps=true;
+
+    // Language handling: on the first chunk use "auto" (whisper detects via
+    // its own encoder pass) and cache the result; on subsequent chunks pin
+    // the cached language so the detection pass is skipped — halving the
+    // per-chunk encoder cost on CPU (critical for real-time chunking).
+    const bool first_chunk = pimpl_->detected_language.empty();
+    wp.language = first_chunk ? "auto" : pimpl_->detected_language.c_str();
+
+    // Wire whisper's abort hooks to the caller's flag so an in-flight chunk
+    // bails in milliseconds when stop() is requested.  abort_callback is
+    // polled before each ggml compute op; encoder_begin_callback gates the
+    // (expensive) encoder.  Both read the same atomic<bool>.
+    if (abort_flag) {
+        auto is_aborted = [](void* ud) -> bool {
+            return static_cast<const std::atomic<bool>*>(ud)->load();
+        };
+        wp.abort_callback = +is_aborted;
+        wp.abort_callback_user_data = const_cast<void*>(
+            static_cast<const void*>(abort_flag));
+        // encoder_begin returns false ⇒ abort (skip encoder).
+        wp.encoder_begin_callback = +[](struct whisper_context*,
+                                        struct whisper_state*, void* ud) -> bool {
+            return !static_cast<const std::atomic<bool>*>(ud)->load();
+        };
+        wp.encoder_begin_callback_user_data = const_cast<void*>(
+            static_cast<const void*>(abort_flag));
+    }
+
+    // whisper_full returns non-zero on abort or failure → treat as no text.
+    if (whisper_full(pimpl_->ctx, wp, pcm, n_samples) != 0) return {};
+
+    // Cache the detected language from the first chunk so subsequent chunks
+    // pin it and skip the detection encoder pass.
+    if (first_chunk) {
+        int lid = whisper_full_lang_id(pimpl_->ctx);
+        if (lid >= 0) pimpl_->detected_language = whisper_lang_str(lid);
+    }
+
+    int ns = whisper_full_n_segments(pimpl_->ctx);
+    std::string text;
+    for (int i = 0; i < ns; i++) {
+        const char* t = whisper_full_get_segment_text(pimpl_->ctx, i);
+        if (t && *t) { text += t; text += " "; }
+    }
+    if (!text.empty() && text.back() == ' ') text.pop_back();
+    return text;
+}
+
+// ---------------------------------------------------------------------------
 // transcribe_stream
 // ---------------------------------------------------------------------------
 
-TranscriptionResult Engine::transcribe_stream(AudioSampleCallback cb) {
+TranscriptionResult Engine::transcribe_stream(AudioSampleCallback cb,
+                                              const std::atomic<bool>* abort_flag) {
     if (!pimpl_->ctx) throw std::runtime_error("no ctx");
     auto t0 = std::chrono::high_resolution_clock::now();
     constexpr int SR=WHISPER_SAMPLE_RATE, CS=SR*3;
     std::vector<float> buf(CS);
-    std::string full; int ts=0;
+    std::string full; int chunks=0;
 
     while (true) {
+        // Fast exit before pulling if already aborted.
+        if (abort_flag && abort_flag->load()) break;
         size_t n = cb(buf.data(), CS); if (n==0) break;
-        buf.resize(n);
-        auto wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-        wp.print_realtime=false; wp.print_progress=false; wp.print_timestamps=false;
-        wp.print_special=false; wp.translate=false; wp.language="auto";
-        wp.detect_language=true; wp.n_threads=pimpl_->n_threads;
-        wp.single_segment=true; wp.no_context=true; wp.no_timestamps=true;
-        if (whisper_full(pimpl_->ctx, wp, buf.data(), (int)n)!=0) continue;
-        int ns = whisper_full_n_segments(pimpl_->ctx);
-        for (int i=0;i<ns;i++) { const char*t=whisper_full_get_segment_text(pimpl_->ctx,i); if(t&&*t) {full+=t;full+=" ";}}
-        ts+=ns; buf.resize(CS);
+
+        std::string chunk_text = transcribe_chunk(buf.data(), (int)n, abort_flag);
+        if (!chunk_text.empty()) { full += chunk_text; full += " "; ++chunks; }
+        buf.resize(CS);
     }
     if (!full.empty() && full.back()==' ') full.pop_back();
     auto t1 = std::chrono::high_resolution_clock::now();
-    return TranscriptionResult{full, (double)std::chrono::duration<double,std::milli>(t1-t0).count(), ts, pimpl_->gpu_initialized};
+    return TranscriptionResult{full, (double)std::chrono::duration<double,std::milli>(t1-t0).count(), chunks, pimpl_->gpu_initialized};
 }
 
 // ---------------------------------------------------------------------------

@@ -2,7 +2,6 @@
 
 #include <wx/wx.h>
 #include <wx/textctrl.h>
-#include <wx/tglbtn.h>
 #include <wx/statusbr.h>
 #include <wx/clipbrd.h>
 #include <memory>
@@ -16,7 +15,7 @@ namespace whisper_xpu {
 }
 
 class AudioCapture;
-class AudioStream;
+class AudioRecorder;
 
 // ── Status bar field indices ──
 // Layout: [Mic info       ] [Device     ] [Model           ] [⚙]
@@ -49,7 +48,7 @@ private:
 
     // ── UI controls ──
     wxTextCtrl*     m_transcriptText;   // main editable transcription area
-    wxToggleButton* m_recordBtn;        // start / stop recording
+    wxButton*       m_recordBtn;        // start / stop recording
     wxButton*       m_clearBtn;         // clear transcription text
     wxButton*       m_copyBtn;          // copy to clipboard
 
@@ -69,7 +68,7 @@ private:
 
     // ── Engine / audio ──
     std::unique_ptr<whisper_xpu::Engine> m_engine;
-    std::unique_ptr<AudioStream>        m_audioStream;
+    std::unique_ptr<AudioRecorder>       m_recorder;
     std::atomic<bool> m_recording{false};
 
     wxDECLARE_EVENT_TABLE();
