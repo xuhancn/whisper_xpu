@@ -8,6 +8,12 @@
 #include <vector>
 #include <functional>
 
+// whisper.cpp's per-inference state (forward decl — keeps whisper.h out of
+// this public header).  Multiple whisper_state*s share ONE Engine's
+// whisper_context so the parallel pool runs 4 concurrent inferences on a
+// single read-only model copy (whisper.cpp issue #523).
+struct whisper_state;
+
 namespace whisper_xpu {
 
 struct WHISPER_XPU_API TranscriptionResult {
@@ -84,17 +90,41 @@ public:
     std::string transcribe_chunk(const float* pcm, int n_samples,
                                 const std::atomic<bool>* abort_flag = nullptr);
 
-    // Transcribe a window of PCM (16 kHz mono) and return its segments with
-    // chunk-local timestamps (t0_ms/t1_ms, relative to `pcm` start).  The
-    // parallel scheduler adds the chunk's global t_start and the merger
-    // dedupes across the 1s overlap by midpoint.
+    // ── Parallel-pool: shared-context inference ──
     //
-    // Unlike transcribe_chunk this emits multiple timestamped segments
-    // (single_segment=false, no_timestamps=false) — required for overlap
-    // merging.  Language is detected on the first call and pinned thereafter
-    // (per-Engine cache).  abort_flag aborts mid-computation.
-    ChunkResult transcribe_window(const float* pcm, int n_samples,
-                                 const std::atomic<bool>* abort_flag = nullptr);
+    // The scheduler's 4 workers share ONE Engine (= one whisper_context =
+    // one read-only model copy).  Each worker owns its own whisper_state
+    // (KV cache / logits / decoders — all per-state), created here and freed
+    // by free_state() after the worker thread joins.  This is whisper.cpp's
+    // "one context + N states" pattern (issue #523) and is what keeps pool
+    // RAM at ~1× model + 4 small states instead of 4× model.
+    //
+    // Caller owns the returned state.  Lifetime: create_state after Engine
+    // init; free_state after the worker thread that used it has joined (the
+    // state must not be in use during whisper_full_with_state when freed).
+    whisper_state* create_state();
+    void free_state(whisper_state* st);
+
+    // Transcribe a window using a caller-owned per-worker `st` (from
+    // create_state), running whisper_full_with_state(ctx, st, …) so many
+    // states can share one context concurrently.
+    //
+    // `detected_language` is a PER-WORKER cache owned by the caller: empty on
+    // the first call ⇒ language="auto" (auto-detect via its own encoder pass)
+    // and the result is written back; subsequent calls pin it, skipping the
+    // detection pass (halves per-window encoder cost — same optimization the
+    // old per-Engine cache had, moved to per-worker because the context is now
+    // shared).  `n_threads` overrides the Engine's default (a pool passes
+    // cores/pool_size so 4×n_threads ≈ core count).
+    //
+    // Emits multiple timestamped segments (single_segment=false,
+    // no_timestamps=false) — required for the merger's overlap dedup by
+    // midpoint.  abort_flag aborts mid-computation (polled before each ggml
+    // op + encoder_begin gate), same wiring as transcribe_chunk.
+    ChunkResult transcribe_window_with_state(whisper_state* st, int n_threads,
+                                             std::string& detected_language,
+                                             const float* pcm, int n_samples,
+                                             const std::atomic<bool>* abort_flag = nullptr);
 
     BenchmarkResult benchmark(const std::string& audio_path, const VadConfig& vad);
 

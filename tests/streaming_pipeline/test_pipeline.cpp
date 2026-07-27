@@ -131,11 +131,13 @@ int main(int argc, char** argv) {
             pcm.size(), dur_s, expected_windows);
 
     // ── Reference transcription (whole-file, for comparison reporting) ──
+    // This single Engine is ALSO the shared context the scheduler's 4 workers
+    // borrow — one model copy for the whole test, not 4 (T6 shared-context).
     std::string ref_text;
+    whisper_xpu::Engine ref(model_path, device);
     {
         fprintf(stderr, "\n--- reference (whole-file transcribe_file) ---\n");
         try {
-            whisper_xpu::Engine ref(model_path, device);
             auto r = ref.transcribe_file(audio_path);
             ref_text = r.text;
             fprintf(stderr, "reference: %zu chars, %d segs, %.0fms\n",
@@ -160,8 +162,8 @@ int main(int argc, char** argv) {
     sched.set_on_chunk([&](int idx, const std::string&) { emit_order.push_back(idx); });
 
     fprintf(stderr, "\n--- pipeline run (headless: feed_audio → windower → 4 workers → merger) ---\n");
-    if (!sched.start_no_capture(model_path, device)) {
-        fprintf(stderr, "FAIL: start_no_capture failed (engine init?)\n");
+    if (!sched.start_no_capture(ref)) {
+        fprintf(stderr, "FAIL: start_no_capture failed (state init?)\n");
         return 2;
     }
 

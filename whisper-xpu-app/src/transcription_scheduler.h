@@ -34,22 +34,30 @@ using ChunkCallback = std::function<void(int, const std::string&)>;
 //   AudioCapture (PortAudio thread) → RingBuffer<float>
 //   Windower  → 6s windows (1s overlap tail + 5s new), one every 5s
 //               → worker queue, indexed, with a global pcm_start time
-//   Pool (4)  → each owns its own Engine (whisper contexts aren't
-//               thread-safe), n_threads = cores/4 (4×5=20).  Pops a window,
-//               Engine::transcribe_window(&m_stopping), posts result → merger.
+//   Pool (4)  → shares ONE Engine (one whisper_context = one read-only model
+//               copy); each worker owns its own whisper_state (KV cache +
+//               compute buffers) and runs whisper_full_with_state.  This is
+//               whisper.cpp's "one context + N states" pattern (issue #523):
+//               pool RAM stays ~1× model + 4 small states instead of 4× model.
+//               n_threads per worker = cores/4 (4×5=20).  Pops a window,
+//               Engine::transcribe_window_with_state(&m_stopping), posts → merger.
 //   Merger    → ordered map; emits chunk K only once K-1 emitted (in-order UI
 //               text despite out-of-order completion).  Overlap dedup: keep a
 //               segment iff its global midpoint ∈ [K*5000+250, K*5000+4750]ms
 //               — 0.25s guards at each 5s boundary ⇒ no duplicate words and
 //               no gaps (boundary-word splits are a documented rare edge case).
-//   stop()    → m_stopping aborts in-flight transcribe_window via the flag;
-//               joins all 6 threads, tears down capture + 4 Engines.
+//   stop()    → m_stopping aborts in-flight transcribe_window_with_state via
+//               the flag; joins all 6 threads, frees the 4 states.  The
+//               shared Engine is BORROWED from the app and is NOT released
+//               here — one model copy for the whole recording session.
 //
 // Two launch modes:
-//   start(micIndex, model, device)  — app path: PortAudio captures into the ring.
-//   start_no_capture(model, device) — headless path: caller feeds PCM via
-//      feed_audio() (e.g. a unit test replaying a WAV through the EXACT same
-//      windower/pool/merger, no mic, no UI).  Pacing is the caller's concern.
+//   start(micIndex, sharedEngine, device)  — app path: PortAudio captures into
+//      the ring; borrows the app's m_engine as the shared context.
+//   start_no_capture(sharedEngine, device) — headless path: caller feeds PCM
+//      via feed_audio() (e.g. a unit test replaying a WAV through the EXACT
+//      same windower/pool/merger, no mic, no UI).  Pacing is the caller's
+//      concern.  `sharedEngine` is borrowed, not owned.
 //
 // Window→global time: every window is 6s with a 1s prefix (the previous
 // window's last 1s, or silence for window 0), so pcm_start_global_ms =
@@ -79,11 +87,15 @@ public:
     TranscriptionScheduler& operator=(const TranscriptionScheduler&) = delete;
 
     // App path: opens the microphone via PortAudio and starts all threads.
-    bool start(int micIndex, const std::string& modelPath, int deviceIndex);
+    // `sharedEngine` is borrowed (e.g. the app's m_engine) — one read-only
+    // model copy for the whole session; not released on stop().  The engine
+    // already carries its device (CPU/GPU), so no device arg here.
+    bool start(int micIndex, whisper_xpu::Engine& sharedEngine);
 
     // Headless path: same threads, no AudioCapture.  Caller pushes PCM via
-    // feed_audio() (e.g. from a WAV).  Returns false on engine failure.
-    bool start_no_capture(const std::string& modelPath, int deviceIndex);
+    // feed_audio() (e.g. from a WAV).  Returns false on state-creation
+    // failure.  `sharedEngine` is borrowed, not owned.
+    bool start_no_capture(whisper_xpu::Engine& sharedEngine);
 
     // Push 16 kHz mono PCM into the ring — same entry point the PortAudio
     // callback uses.  For the headless/file-replay path.
@@ -114,17 +126,21 @@ private:
     void merger_loop();
     static void join_thread(std::thread& t);
 
-    // Shared engine-creation (4 engines, n_threads = cores/4).  Returns false
-    // on failure (caller already cleared m_engines).
-    bool create_pool(const std::string& modelPath, int deviceIndex);
+    // Create the 4 per-worker whisper_state*s on the borrowed shared engine.
+    // Returns false (clearing m_states) if any whisper_init_state fails.
+    bool init_states();
 
     TextCallback m_on_text;
     ChunkCallback m_on_chunk;
 
-    // Worker pool — 4 Engines created in start()/start_no_capture(), destroyed
-    // in stop().
+    // Worker pool — ONE borrowed Engine (shared read-only model context) + 4
+    // per-worker whisper_state*s (own KV cache + compute buffers), created in
+    // start()/start_no_capture(), freed in stop().  The Engine itself is
+    // borrowed (e.g. the app's m_engine) and NOT released here.
     static constexpr int POOL_SIZE = 4;
-    std::vector<std::unique_ptr<whisper_xpu::Engine>> m_engines;
+    whisper_xpu::Engine*            m_sharedEngine = nullptr;  // non-owning
+    std::vector<whisper_state*>     m_states;                   // POOL_SIZE, owned
+    std::vector<std::string>        m_workerLang;               // POOL_SIZE, per-worker lang cache
     int m_nThreadsPerWorker = 4;
 
     // Capture + ring (PortAudio thread → ring → windower).  In headless mode

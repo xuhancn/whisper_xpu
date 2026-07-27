@@ -242,38 +242,52 @@ std::string Engine::transcribe_chunk(const float* pcm, int n_samples,
 }
 
 // ---------------------------------------------------------------------------
-// transcribe_window  (windowed PCM → multiple timestamped segments, abortable)
+// Parallel-pool: shared-context state + transcribe_window_with_state
 //
-// Used by the parallel scheduler's worker pool.  Unlike transcribe_chunk
-// (single_segment + no_timestamps → one untimestamped text blob), this emits
-// multiple segments each with a chunk-local [t0_ms, t1_ms] range (relative to
-// `pcm` start) so the merger can place each segment on the global timeline and
-// dedupe across the 1s window overlap by midpoint.  Language is detected on
-// the first call and pinned thereafter (per-Engine cache, shared with
-// transcribe_chunk — so a worker's first window eats the one-time detection
-// encoder pass, then all later windows pin it).
+// The scheduler's 4 workers share ONE Engine (one whisper_context = one
+// read-only model copy).  Each worker owns a whisper_state (KV cache,
+// logits, decoders — all per-state, allocated in whisper_init_state) and
+// runs whisper_full_with_state(ctx, st, …) concurrently.  This is whisper.cpp's
+// "one context + N states" pattern (issue #523): pool RAM stays at ~1× model
+// + 4 small states instead of 4× model.  (The now-removed transcribe_window
+// used ctx->state — only one such state per context, so it could not run
+// concurrently across workers.)
 // ---------------------------------------------------------------------------
 
-ChunkResult Engine::transcribe_window(const float* pcm, int n_samples,
-                                     const std::atomic<bool>* abort_flag) {
+whisper_state* Engine::create_state() {
+    if (!pimpl_->ctx) return nullptr;
+    return whisper_init_state(pimpl_->ctx);
+}
+
+void Engine::free_state(whisper_state* st) {
+    if (st) whisper_free_state(st);
+}
+
+ChunkResult Engine::transcribe_window_with_state(whisper_state* st, int n_threads,
+                                                 std::string& detected_language,
+                                                 const float* pcm, int n_samples,
+                                                 const std::atomic<bool>* abort_flag) {
     ChunkResult result;
-    if (!pimpl_->ctx || n_samples <= 0) return result;
+    if (!pimpl_->ctx || !st || n_samples <= 0) return result;
 
     auto wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     wp.print_realtime=false; wp.print_progress=false; wp.print_timestamps=false;
     wp.print_special=false; wp.translate=false;
     // detect_language=false: see transcribe_file — true means detect-and-exit.
-    wp.detect_language=false; wp.n_threads=pimpl_->n_threads;
+    wp.detect_language=false;
+    wp.n_threads = n_threads > 0 ? n_threads : pimpl_->n_threads;
     // Multi-segment + timestamps: REQUIRED for overlap merging (the merger
-    // keys on each segment's midpoint).  transcribe_chunk sets both true to
-    // collapse to a single untimestamped phrase — wrong for the pipeline.
+    // keys on each segment's midpoint).
     wp.single_segment=false; wp.no_timestamps=false; wp.no_context=true;
 
-    const bool first_chunk = pimpl_->detected_language.empty();
-    wp.language = first_chunk ? "auto" : pimpl_->detected_language.c_str();
+    // Per-worker language cache (caller-owned): first window auto-detects and
+    // pins; later windows skip the detection encoder pass.
+    const bool first_chunk = detected_language.empty();
+    wp.language = first_chunk ? "auto" : detected_language.c_str();
 
-    // Abort wiring — identical to transcribe_chunk: abort_callback is polled
+    // Abort wiring — identical to transcribe_chunk: abort_callback polled
     // before each ggml compute op; encoder_begin gates the expensive encoder.
+    // The callbacks receive (ctx, state, ud) but ignore ctx/state and read ud.
     if (abort_flag) {
         auto is_aborted = [](void* ud) -> bool {
             return static_cast<const std::atomic<bool>*>(ud)->load();
@@ -290,13 +304,13 @@ ChunkResult Engine::transcribe_window(const float* pcm, int n_samples,
     }
 
     auto t0 = std::chrono::high_resolution_clock::now();
-    int rc = whisper_full(pimpl_->ctx, wp, pcm, n_samples);
+    int rc = whisper_full_with_state(pimpl_->ctx, st, wp, pcm, n_samples);
     auto t1 = std::chrono::high_resolution_clock::now();
     result.processing_time_ms = std::chrono::duration<double,std::milli>(t1-t0).count();
 
-    // whisper_full returns non-zero on abort OR hard failure → no usable
-    // segments either way.  Flag aborted only when the caller's flag was
-    // actually set (distinguishes a stop() abort from a real failure).
+    // whisper_full_with_state returns non-zero on abort OR hard failure → no
+    // usable segments either way.  Flag aborted only when the caller's flag
+    // was actually set (distinguishes a stop() abort from a real failure).
     if (rc != 0) {
         result.aborted = abort_flag && abort_flag->load();
         return result;
@@ -305,21 +319,20 @@ ChunkResult Engine::transcribe_window(const float* pcm, int n_samples,
     // Cache the detected language so subsequent windows pin it and skip the
     // detection encoder pass.
     if (first_chunk) {
-        int lid = whisper_full_lang_id(pimpl_->ctx);
-        if (lid >= 0) pimpl_->detected_language = whisper_lang_str(lid);
+        int lid = whisper_full_lang_id_from_state(st);
+        if (lid >= 0) detected_language = whisper_lang_str(lid);
     }
 
-    // Extract timestamped segments.  whisper_full_get_segment_t0/t1 return
-    // 10-millisecond units (centiseconds) → ×10 for ms.  Text is returned
-    // raw (leading-space-trimmed later by the merger when concatenating).
-    int ns = whisper_full_n_segments(pimpl_->ctx);
+    // Extract timestamped segments.  _from_state accessors read from `st`.
+    // t0/t1 are 10-millisecond units (centiseconds) → ×10 for ms.
+    int ns = whisper_full_n_segments_from_state(st);
     result.segments.reserve(ns);
     for (int i = 0; i < ns; i++) {
         ChunkSegment seg;
-        const char* t = whisper_full_get_segment_text(pimpl_->ctx, i);
+        const char* t = whisper_full_get_segment_text_from_state(st, i);
         seg.text  = t ? t : "";
-        seg.t0_ms = whisper_full_get_segment_t0(pimpl_->ctx, i) * 10;
-        seg.t1_ms = whisper_full_get_segment_t1(pimpl_->ctx, i) * 10;
+        seg.t0_ms = whisper_full_get_segment_t0_from_state(st, i) * 10;
+        seg.t1_ms = whisper_full_get_segment_t1_from_state(st, i) * 10;
         result.segments.push_back(std::move(seg));
     }
     return result;

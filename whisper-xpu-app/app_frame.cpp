@@ -426,7 +426,10 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
             };
 
             m_scheduler = std::make_unique<TranscriptionScheduler>(on_text);
-            if (!m_scheduler->start(m_micIndex, m_modelPath, m_deviceIndex)) {
+            // Borrow the app's m_engine as the pool's shared context: one
+            // read-only model copy for the whole session (4 per-worker states
+            // are created inside the scheduler, not 4 model loads).
+            if (!m_scheduler->start(m_micIndex, *m_engine)) {
                 m_scheduler.reset();
                 wxMessageBox(
                     "Could not open the microphone.\n\n"
