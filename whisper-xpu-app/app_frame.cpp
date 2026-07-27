@@ -2,7 +2,7 @@
 #include "whisper_xpu_core.h"
 #include "device_detect.h"
 #include "audio_capture.h"
-#include "src/audio_recorder.h"
+#include "src/transcription_scheduler.h"
 
 #include <wx/filedlg.h>
 #include <wx/msgdlg.h>
@@ -85,8 +85,8 @@ void AppFrame::OnIdleInit(wxIdleEvent& event) {
 }
 
 AppFrame::~AppFrame() {
-    if (m_recording && m_recorder)
-        m_recorder->stop();
+    if (m_recording && m_scheduler)
+        m_scheduler->stop();
 }
 
 // ──────────────────────────────────────────
@@ -226,8 +226,8 @@ void AppFrame::UpdateStatusBar() {
 }
 
 bool AppFrame::LoadEngine(const std::string& path) {
-    if (m_recording && m_recorder) {
-        m_recorder->stop();
+    if (m_recording && m_scheduler) {
+        m_scheduler->stop();
         m_recording = false;
         m_recordBtn->SetLabel("Record");
     }
@@ -425,9 +425,9 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
                 });
             };
 
-            m_recorder = std::make_unique<AudioRecorder>(m_engine.get(), on_text);
-            if (!m_recorder->start(m_micIndex)) {
-                m_recorder.reset();
+            m_scheduler = std::make_unique<TranscriptionScheduler>(on_text);
+            if (!m_scheduler->start(m_micIndex, m_modelPath, m_deviceIndex)) {
+                m_scheduler.reset();
                 wxMessageBox(
                     "Could not open the microphone.\n\n"
                     "Common causes:\n"
@@ -443,8 +443,8 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
             m_recording = true;
         } else {
             // ── Stop ──
-            if (m_recorder) m_recorder->stop();
-            m_recorder.reset();
+            if (m_scheduler) m_scheduler->stop();
+            m_scheduler.reset();
 
             m_recordBtn->SetLabel("Record");
             SetStatusText("Mic: Default", STATUS_MIC);
@@ -479,9 +479,9 @@ void AppFrame::OnStatusBarClick(wxMouseEvent& ev) {
 }
 
 void AppFrame::OnClose(wxCloseEvent& event) {
-    if (m_recording && m_recorder)
-        m_recorder->stop();
-    m_recorder.reset();
+    if (m_recording && m_scheduler)
+        m_scheduler->stop();
+    m_scheduler.reset();
     m_engine.reset();
     event.Skip();
 }

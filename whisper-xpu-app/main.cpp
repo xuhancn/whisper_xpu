@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <io.h>
 #include "app_frame.h"
+#include "src/sched_log.h"
 // included via whisper_xpu_core.h
 
 class WhisperApp : public wxApp {
@@ -31,6 +32,14 @@ public:
             logfp = _fdopen(dupfd, "w");
         }
         wxLog::SetActiveTarget(new wxLogStderr(logfp));
+
+        // Route the TranscriptionScheduler's pluggable log sink (which is
+        // wx-free so it can also run in a headless unit test) into wxLog, so
+        // its [Scheduler] lines land in the same stderr log as the rest of
+        // the app.  The headless test leaves the sink unset (→ stderr).
+        sched_set_log_sink([](const std::string& s) {
+            wxLogMessage("%s", s.c_str());
+        });
         // The SYCL/oneMKL init path inside the merged core library can
         // crash with a null function pointer (sycl::platform::get_platforms)
         // when the Intel GPU driver / Level Zero loader doesn't match the

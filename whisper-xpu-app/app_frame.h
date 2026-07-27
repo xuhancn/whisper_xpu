@@ -15,7 +15,7 @@ namespace whisper_xpu {
 }
 
 class AudioCapture;
-class AudioRecorder;
+class TranscriptionScheduler;
 
 // ── Status bar field indices ──
 // Layout: [Mic info       ] [Device     ] [Model           ] [⚙]
@@ -68,7 +68,7 @@ private:
 
     // ── Engine / audio ──
     std::unique_ptr<whisper_xpu::Engine> m_engine;
-    std::unique_ptr<AudioRecorder>       m_recorder;
+    std::unique_ptr<TranscriptionScheduler> m_scheduler;
     std::atomic<bool> m_recording{false};
 
     wxDECLARE_EVENT_TABLE();
