@@ -27,16 +27,43 @@ target_include_directories(whisper_xpu_sycl_core PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/whisper.cpp/ggml/include
 )
 
-target_compile_options(whisper_xpu_sycl_core PRIVATE -fsycl)
+# -fsycl is added to BOTH compile and link (see link block below).  icpx honors
+# it at compile (emits SPIR-V alongside host code).  But at the LINK step, under
+# the VS generator + Intel MSBuild toolset, the linker is lld-link, which IGNORES
+# -fsycl as an unknown CLI flag (you see "ignoring unknown argument '-fsycl'" in
+# the link log).  Without the device-code post-link (sycl-post-link +
+# clang-offload-bundler) the /WHOLEARCHIVE'd ggml-sycl compute kernels never get
+# bundled into a device image inside this DLL, and the first GPU op dies at
+# runtime: "No kernel named im2col_sycl<half> was found".
+#
+# The Windows mechanism that triggers sycl-post-link is the EnableSyclOffload
+# MSBuild metadata: the Intel toolset's link task reads it and runs the post-link.
+# This is NOT a PlatformToolset or a hardcoded version — it is a per-source
+# compile metadata flag, the same role -fsycl-as-link-driver plays on Linux/Ninja.
+# PyTorch's FindSYCLToolkit (and our cmake/FindSYCLToolkit.cmake) avoids it only
+# because it targets icx-as-linker; on Windows under the VS generator there is no
+# CLI equivalent lld-link honors, so the metadata is mandatory here.
+set_source_files_properties(
+    sycl_src/device_detect.cpp engine.cpp merge_segments.cpp
+    PROPERTIES VS_SETTINGS "EnableSyclOffload=true"
+)
 
-# Intel C++ Compiler toolset on Windows
+target_compile_options(whisper_xpu_sycl_core PRIVATE -fsycl -fno-delayed-template-parsing)
+
+# Under the VS generator the SYCL core MUST compile with the Intel oneAPI
+# compiler: MSVC's cl.exe does not understand -fsycl.  We do NOT hardcode a
+# toolset version here — the name comes from the DNNL_INTEL_TOOLSET env var
+# (set by the build .bat after setvars.bat), the same source ggml-sycl and
+# oneDNN consult.  If it is unset, fail loudly rather than guess a year.
 if(WIN32 AND CMAKE_GENERATOR MATCHES "Visual Studio")
     if(DEFINED ENV{DNNL_INTEL_TOOLSET})
         set_target_properties(whisper_xpu_sycl_core PROPERTIES
             VS_PLATFORM_TOOLSET "$ENV{DNNL_INTEL_TOOLSET}")
     else()
-        set_target_properties(whisper_xpu_sycl_core PROPERTIES
-            VS_PLATFORM_TOOLSET "Intel C++ Compiler 2025")
+        message(FATAL_ERROR
+            "DNNL_INTEL_TOOLSET not set.  Under the VS generator the SYCL core "
+            "needs the Intel oneAPI toolset (cl.exe cannot compile -fsycl).  "
+            "Run setvars.bat, then:  set DNNL_INTEL_TOOLSET=Intel C++ Compiler 2026")
     endif()
 endif()
 
@@ -84,11 +111,19 @@ if(WIN32)
     )
 endif()
 
-# Delay-load sycl8.dll so the DLL can load even when the SYCL
-# runtime is absent — functions return 0 / empty gracefully.
+# -fsycl on the LINK (not just compile) is what makes xilink run the SYCL
+# device-code post-link over the /WHOLEARCHIVE'd ggml-sycl objects, bundling
+# their compute kernels (im2col, matmul, …) into a device image inside this
+# DLL.  Without -fsycl on link the link is a plain host link and every compute
+# kernel is missing at runtime ("No kernel named im2col_sycl<half> was found").
+#
+# Delay-load sycl9.dll (oneAPI 2026.1+; was sycl8.dll through 2025.x) so the
+# DLL can load even when the SYCL runtime is absent — functions return 0 /
+# empty gracefully.
 if(WIN32)
     target_link_options(whisper_xpu_sycl_core PRIVATE
-        /DELAYLOAD:sycl8.dll
+        -fsycl
+        /DELAYLOAD:sycl9.dll
     )
     target_link_libraries(whisper_xpu_sycl_core PRIVATE delayimp)
 endif()
@@ -97,4 +132,3 @@ endif()
 if(TARGET DNNL::dnnl AND ONEDNN_STATIC)
     target_link_libraries(whisper_xpu_sycl_core PRIVATE DNNL::dnnl)
 endif()
-

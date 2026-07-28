@@ -15,6 +15,22 @@
 #include <algorithm>
 #include <fstream>
 
+namespace {
+// Abort callbacks as plain free functions (cdecl), not lambdas.  Under icpx
+// on Windows, converting a lambda to a function pointer via unary + decorates
+// the pointer with __attribute__((vectorcall)), which is incompatible with
+// ggml_abort_callback / whisper_encoder_begin_callback (cdecl) and fails to
+// compile.  Free functions keep cdecl and assign cleanly.  Logic is identical
+// to the lambdas they replace.
+static bool xpu_abort_cb(void* ud) {
+    return static_cast<const std::atomic<bool>*>(ud)->load();
+}
+static bool xpu_encoder_begin_cb(struct whisper_context*,
+                                 struct whisper_state*, void* ud) {
+    return !static_cast<const std::atomic<bool>*>(ud)->load();
+}
+} // namespace
+
 namespace whisper_xpu {
 
 // ---------------------------------------------------------------------------
@@ -206,17 +222,11 @@ std::string Engine::transcribe_chunk(const float* pcm, int n_samples,
     // polled before each ggml compute op; encoder_begin_callback gates the
     // (expensive) encoder.  Both read the same atomic<bool>.
     if (abort_flag) {
-        auto is_aborted = [](void* ud) -> bool {
-            return static_cast<const std::atomic<bool>*>(ud)->load();
-        };
-        wp.abort_callback = +is_aborted;
+        wp.abort_callback = xpu_abort_cb;
         wp.abort_callback_user_data = const_cast<void*>(
             static_cast<const void*>(abort_flag));
         // encoder_begin returns false ⇒ abort (skip encoder).
-        wp.encoder_begin_callback = +[](struct whisper_context*,
-                                        struct whisper_state*, void* ud) -> bool {
-            return !static_cast<const std::atomic<bool>*>(ud)->load();
-        };
+        wp.encoder_begin_callback = xpu_encoder_begin_cb;
         wp.encoder_begin_callback_user_data = const_cast<void*>(
             static_cast<const void*>(abort_flag));
     }
@@ -289,16 +299,10 @@ ChunkResult Engine::transcribe_window_with_state(whisper_state* st, int n_thread
     // before each ggml compute op; encoder_begin gates the expensive encoder.
     // The callbacks receive (ctx, state, ud) but ignore ctx/state and read ud.
     if (abort_flag) {
-        auto is_aborted = [](void* ud) -> bool {
-            return static_cast<const std::atomic<bool>*>(ud)->load();
-        };
-        wp.abort_callback = +is_aborted;
+        wp.abort_callback = xpu_abort_cb;
         wp.abort_callback_user_data = const_cast<void*>(
             static_cast<const void*>(abort_flag));
-        wp.encoder_begin_callback = +[](struct whisper_context*,
-                                        struct whisper_state*, void* ud) -> bool {
-            return !static_cast<const std::atomic<bool>*>(ud)->load();
-        };
+        wp.encoder_begin_callback = xpu_encoder_begin_cb;
         wp.encoder_begin_callback_user_data = const_cast<void*>(
             static_cast<const void*>(abort_flag));
     }
