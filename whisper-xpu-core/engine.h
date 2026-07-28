@@ -57,7 +57,12 @@ struct WHISPER_XPU_API ChunkResult {
     bool aborted = false;
 };
 
-using AudioSampleCallback = std::function<size_t(float* buffer, size_t max_samples)>;
+// Raw function pointer (not std::function): under icpx on Windows, any
+// std::function<F> instantiation trips MSVC STL's _Get_function_impl
+// static_assert ("std::function only accepts function types").  transcribe_stream
+// is currently uncalled (the app uses the scheduler), so a raw pointer is safe
+// and keeps std::function out of the icpx-compiled core entirely.
+using AudioSampleCallback = size_t(*)(float* buffer, size_t max_samples);
 
 class WHISPER_XPU_API Engine {
 public:

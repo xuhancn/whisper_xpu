@@ -44,25 +44,26 @@ add_custom_command(TARGET test_pipeline POST_BUILD
     COMMENT "Copying whisper_xpu_sycl_core.dll to test output directory"
 )
 
-# ── Copy Intel oneAPI runtime DLLs (sycl8.dll etc.) next to the test exe ──
-# Same set the app copies; lets the test run without setvars on PATH.
+# ── Copy Intel oneAPI runtime DLLs next to the test exe ──
+# oneAPI 2026.1: sycl8.dll → sycl9.dll; tcm.dll moved to tcm/latest/bin.
+# Every copy is EXISTS-guarded so a relocated DLL never fails the build.
+# run_gpu_test.bat sets setvars, so PATH covers any DLL not copied here.
 if(WIN32 AND SYCL_LIBRARY_DIR)
     get_filename_component(_sycl_bin "${SYCL_LIBRARY_DIR}/../bin" ABSOLUTE)
-    set(_rt_dlls sycl8.dll svml_dispmd.dll libmmd.dll libiomp5md.dll
+    set(_rt_dlls sycl9.dll svml_dispmd.dll libmmd.dll libiomp5md.dll
         ur_win_proxy_loader.dll ur_loader.dll
         ur_adapter_level_zero.dll ur_adapter_opencl.dll
-        umf.dll tcm.dll)
-    foreach(_opt_dll ur_adapter_level_zero_v2.dll libhwloc-15.dll)
-        if(EXISTS "${_sycl_bin}/${_opt_dll}")
-            list(APPEND _rt_dlls ${_opt_dll})
-        endif()
-    endforeach()
+        umf.dll tcm.dll
+        ur_adapter_level_zero_v2.dll libhwloc-15.dll sycl-jit.dll)
     foreach(_dll ${_rt_dlls})
-        add_custom_command(TARGET test_pipeline POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${_sycl_bin}/${_dll}"
-                $<TARGET_FILE_DIR:test_pipeline>
-            COMMENT "Copying ${_dll} to test output directory"
-        )
+        if(EXISTS "${_sycl_bin}/${_dll}")
+            add_custom_command(TARGET test_pipeline POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${_sycl_bin}/${_dll}"
+                    $<TARGET_FILE_DIR:test_pipeline>
+                COMMENT "Copying ${_dll} to test output directory")
+        else()
+            message(STATUS "test_pipeline: ${_dll} not in ${_sycl_bin} (PATH at runtime)")
+        endif()
     endforeach()
 endif()
