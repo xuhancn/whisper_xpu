@@ -140,7 +140,23 @@ Engine::Engine(const std::string& path, int device_id, int n_threads) : pimpl_(s
     }
     auto cp = whisper_context_default_params();
     cp.use_gpu = pimpl_->gpu_initialized; cp.gpu_device = device_id;
-    cp.flash_attn = pimpl_->gpu_initialized;  // flash_attn only on GPU
+    // flash_attn is DISABLED on the SYCL GPU path.  whisper.cpp's SYCL
+    // flash-attention kernel is a known-fragile path on Intel Arc (flash_attn
+    // ON has been reported to produce wrong output for large-v3/turbo).  It is
+    // NOT the root cause of the q8_0-gibberish bug below (verified by toggling
+    // it off — turbo q8_0 still fails), but OFF is the safer default on SYCL
+    // and does not regress tiny (F16 still transcribes correctly, 7/7, ~18ms
+    // stop).  Leaving it off until GGML_SYCL_F16 is enabled and validated.
+    //
+    // SEPARATE known bug (NOT fixed here): the q8_0 turbo/large-v3 model
+    // (ftype=7) produces GARBAGE on this SYCL GPU build — ref transcribe_file
+    // → "  ." (5 chars) vs CPU 877 chars, all segments dropped by the merger.
+    // q5_0 turbo (ftype=8) and tiny F16 (ftype=1) WORK on the same GPU.  This
+    // isolates it to the ggml-sycl q8_0 dequant/mmv kernel for n_audio_state
+    // =1024 tensors on Arc A770M / driver 1.15.38308 / oneAPI 2025.3.  Fixing
+    // requires a ggml-sycl kernel patch or rebuild, not a config change.
+    // WORKAROUND: use the q5_0 turbo model on GPU (models/ggml-large-v3-turbo-q5_0.bin).
+    cp.flash_attn = false;
     pimpl_->ctx = whisper_init_from_file_with_params(path.c_str(), cp);
     if (!pimpl_->ctx) throw std::runtime_error("Failed to load: " + path);
     if (!pimpl_->gpu_initialized) pimpl_->device_desc = "CPU (" + std::to_string(pimpl_->n_threads) + "t)";

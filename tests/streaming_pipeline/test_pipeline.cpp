@@ -134,12 +134,14 @@ int main(int argc, char** argv) {
     // This single Engine is ALSO the shared context the scheduler's 4 workers
     // borrow — one model copy for the whole test, not 4 (T6 shared-context).
     std::string ref_text;
+    double ref_ms = 0.0;  // single-pass whole-file cost (for timeout budget)
     whisper_xpu::Engine ref(model_path, device);
     {
         fprintf(stderr, "\n--- reference (whole-file transcribe_file) ---\n");
         try {
             auto r = ref.transcribe_file(audio_path);
             ref_text = r.text;
+            ref_ms  = r.processing_time_ms;
             fprintf(stderr, "reference: %zu chars, %d segs, %.0fms\n",
                     r.text.size(), r.segment_count, r.processing_time_ms);
             fprintf(stderr, "ref sample: %.120s\n", r.text.c_str());
@@ -170,7 +172,22 @@ int main(int argc, char** argv) {
     // Pre-load the entire clip; the windower drains it at worker speed.
     sched.feed_audio(pcm.data(), pcm.size());
 
-    // Wait for all expected windows to emit in order (or a 60s safety timeout).
+    // Wait for all expected windows to emit in order (or a model-scaled timeout).
+    //
+    // The 60s floor covers tiny/turbo (each window <2s).  Heavy models under the
+    // scheduler's 4-way CPU concurrency (4 states x N threads = hw threads) can
+    // take ~30-40s PER 6s window due to memory-bandwidth contention — far more
+    // than the single-pass reference.  Scale the budget from the measured
+    // whole-file reference cost: per-window uncontended ≈ ref_ms/expected_windows,
+    // inflated by an 8x concurrency-contention factor + 2x safety margin, with a
+    // 60s floor and a 600s ceiling (so a genuinely stuck run still aborts).
+    double per_window_uncontended_ms = expected_windows > 0 ? ref_ms / expected_windows : 5000.0;
+    int timeout_s = (int)(per_window_uncontended_ms * 8.0 * 2.0 * expected_windows / 1000.0);
+    if (timeout_s < 60)   timeout_s = 60;
+    if (timeout_s > 600)  timeout_s = 600;
+    fprintf(stderr, "emit timeout: %ds (per-window ref ≈ %.0fms x8 contention x2 margin x%d windows)\n",
+            timeout_s, per_window_uncontended_ms, expected_windows);
+
     using clock = std::chrono::steady_clock;
     auto t0 = clock::now();
     int last_emit = -1;
@@ -182,8 +199,9 @@ int main(int argc, char** argv) {
                     s.next_emit, expected_windows, s.windows_dispatched, s.windows_completed);
             last_emit = s.next_emit;
         }
-        if (std::chrono::duration_cast<std::chrono::seconds>(clock::now() - t0).count() > 60) {
-            fprintf(stderr, "  TIMEOUT waiting for %d emits (at %d)\n", expected_windows, s.next_emit);
+        if (std::chrono::duration_cast<std::chrono::seconds>(clock::now() - t0).count() > timeout_s) {
+            fprintf(stderr, "  TIMEOUT waiting for %d emits (at %d, limit %ds)\n",
+                    expected_windows, s.next_emit, timeout_s);
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
