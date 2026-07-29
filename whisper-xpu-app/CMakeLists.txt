@@ -4,7 +4,13 @@ add_executable(whisper_xpu_app WIN32
     audio_capture.cpp
     src/sched_log.cpp
     src/transcription_scheduler.cpp
+    zh_converter.cpp
 )
+
+# Vendored OpenCC text dicts (third_party/opencc-data) — read at runtime by
+# zh_converter for the Simplified/Traditional Chinese-display modes.
+target_compile_definitions(whisper_xpu_app PRIVATE
+    WHISPER_XPU_OPENCC_DATA_DIR="${CMAKE_SOURCE_DIR}/third_party/opencc-data")
 
 target_include_directories(whisper_xpu_app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
