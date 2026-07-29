@@ -50,7 +50,7 @@ add_custom_command(TARGET test_pipeline POST_BUILD
 # run_gpu_test.bat sets setvars, so PATH covers any DLL not copied here.
 if(WIN32 AND SYCL_LIBRARY_DIR)
     get_filename_component(_sycl_bin "${SYCL_LIBRARY_DIR}/../bin" ABSOLUTE)
-    set(_rt_dlls sycl9.dll svml_dispmd.dll libmmd.dll libiomp5md.dll
+    set(_rt_dlls sycl7.dll sycl8.dll sycl9.dll svml_dispmd.dll libmmd.dll libiomp5md.dll
         ur_win_proxy_loader.dll ur_loader.dll
         ur_adapter_level_zero.dll ur_adapter_opencl.dll
         umf.dll tcm.dll
@@ -67,3 +67,7 @@ if(WIN32 AND SYCL_LIBRARY_DIR)
         endif()
     endforeach()
 endif()
+
+# ggml/whisper/ggml-sycl now ship as SHARED DLLs (see top-level CMakeLists.txt);
+# co-locate them beside the test exe so it loads at runtime.
+whisper_xpu_copy_shared_libs(test_pipeline)

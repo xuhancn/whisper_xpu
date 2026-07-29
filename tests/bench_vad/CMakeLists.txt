@@ -8,3 +8,4 @@ target_compile_definitions(bench_vad PRIVATE
     VAD_MODEL_DIR="${CMAKE_SOURCE_DIR}/models/vad_model"
 )
 target_link_libraries(bench_vad PRIVATE whisper_xpu_sycl_core)
+whisper_xpu_copy_shared_libs(bench_vad)

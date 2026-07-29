@@ -7,7 +7,9 @@ option(ONEDNN_STATIC "Link oneDNN as static library (build from source)" ON)
 if(ONEDNN_STATIC)
     include(ExternalProject)
 
-    set(ONEDNN_SRC_DIR "${CMAKE_SOURCE_DIR}/third_party/oneDNN")
+    if(NOT ONEDNN_SRC_DIR)
+        set(ONEDNN_SRC_DIR "${CMAKE_SOURCE_DIR}/third_party/oneDNN")
+    endif()
     set(ONEDNN_PREFIX  "${CMAKE_BINARY_DIR}/oneDNN")
 
     if(NOT EXISTS "${ONEDNN_SRC_DIR}/CMakeLists.txt")
@@ -31,35 +33,67 @@ if(ONEDNN_STATIC)
 
     if(WIN32)
         set(DNNL_LIB_NAME "dnnl.lib")
-        if(DEFINED ENV{DNNL_INTEL_TOOLSET})
+        if(CMAKE_GENERATOR MATCHES "Ninja")
+            # Ninja: icx is already the configured compiler; there is no VS
+            # toolset/platform concept (passing -T makes Ninja fail with
+            # "does not support toolset specification").  Pass icx to the
+            # sub-build explicitly — ExternalProject does NOT inherit the
+            # parent's CMAKE_<LANG>_COMPILER by default.  Single-config →
+            # the library lands in src/, not src/Release/.
+            message(STATUS "oneDNN: Ninja + icx sub-build (no VS toolset)")
+            set(_onednn_byproduct "<BINARY_DIR>/src/${DNNL_LIB_NAME}")
+            ExternalProject_Add(oneDNN_build
+                SOURCE_DIR      "${ONEDNN_SRC_DIR}"
+                PREFIX          "${ONEDNN_PREFIX}"
+                CMAKE_GENERATOR Ninja
+                CMAKE_ARGS
+                    -DCMAKE_CXX_COMPILER=icx
+                    -DCMAKE_C_COMPILER=icx
+                    -DCMAKE_BUILD_TYPE=Release
+                    -DDNNL_GPU_RUNTIME=SYCL
+                    -DDNNL_CPU_RUNTIME=THREADPOOL
+                    -DDNNL_BUILD_TESTS=OFF
+                    -DDNNL_BUILD_EXAMPLES=OFF
+                    -DONEDNN_BUILD_GRAPH=ON
+                    -DDNNL_LIBRARY_TYPE=STATIC
+                    -DDNNL_DPCPP_HOST_COMPILER=DEFAULT
+                    -DDNNL_ENABLE_ITT_TASKS=OFF
+                    -DDNNL_ENABLE_JIT_PROFILING=OFF
+                    -DSYCL_FLAG_SUPPORTED=TRUE
+                BUILD_COMMAND ${_dnnl_build_cmd}
+                BUILD_BYPRODUCTS "${_onednn_byproduct}"
+                INSTALL_COMMAND ""
+            )
+        elseif(DEFINED ENV{DNNL_INTEL_TOOLSET})
             set(_intel_toolset "$ENV{DNNL_INTEL_TOOLSET}")
             message(STATUS "oneDNN: using VS toolset '${_intel_toolset}'")
+            set(_onednn_byproduct "<BINARY_DIR>/src/Release/${DNNL_LIB_NAME}")
+            ExternalProject_Add(oneDNN_build
+                SOURCE_DIR      "${ONEDNN_SRC_DIR}"
+                PREFIX          "${ONEDNN_PREFIX}"
+                CMAKE_GENERATOR         "${CMAKE_GENERATOR}"
+                CMAKE_GENERATOR_PLATFORM "${CMAKE_GENERATOR_PLATFORM}"
+                CMAKE_GENERATOR_TOOLSET  "${_intel_toolset}"
+                CMAKE_ARGS
+                    -DDNNL_GPU_RUNTIME=SYCL
+                    -DDNNL_CPU_RUNTIME=THREADPOOL
+                    -DDNNL_BUILD_TESTS=OFF
+                    -DDNNL_BUILD_EXAMPLES=OFF
+                    -DONEDNN_BUILD_GRAPH=ON
+                    -DDNNL_LIBRARY_TYPE=STATIC
+                    -DDNNL_DPCPP_HOST_COMPILER=DEFAULT
+                    -DDNNL_ENABLE_ITT_TASKS=OFF
+                    -DDNNL_ENABLE_JIT_PROFILING=OFF
+                    -DSYCL_FLAG_SUPPORTED=TRUE
+                BUILD_COMMAND ${_dnnl_build_cmd}
+                BUILD_BYPRODUCTS "${_onednn_byproduct}"
+                INSTALL_COMMAND ""
+            )
         else()
             message(FATAL_ERROR "oneDNN: set DNNL_INTEL_TOOLSET in your environment. "
                 "Run setvars.bat from oneAPI, then:\n"
-                "  set DNNL_INTEL_TOOLSET=Intel C++ Compiler 2025")
+                "  set DNNL_INTEL_TOOLSET=Intel C++ Compiler 2026")
         endif()
-        ExternalProject_Add(oneDNN_build
-            SOURCE_DIR      "${ONEDNN_SRC_DIR}"
-            PREFIX          "${ONEDNN_PREFIX}"
-            CMAKE_GENERATOR         "${CMAKE_GENERATOR}"
-            CMAKE_GENERATOR_PLATFORM "${CMAKE_GENERATOR_PLATFORM}"
-            CMAKE_GENERATOR_TOOLSET  "${_intel_toolset}"
-            CMAKE_ARGS
-                -DDNNL_GPU_RUNTIME=SYCL
-                -DDNNL_CPU_RUNTIME=THREADPOOL
-                -DDNNL_BUILD_TESTS=OFF
-                -DDNNL_BUILD_EXAMPLES=OFF
-                -DONEDNN_BUILD_GRAPH=ON
-                -DDNNL_LIBRARY_TYPE=STATIC
-                -DDNNL_DPCPP_HOST_COMPILER=DEFAULT
-                -DDNNL_ENABLE_ITT_TASKS=OFF
-                -DDNNL_ENABLE_JIT_PROFILING=OFF
-                -DSYCL_FLAG_SUPPORTED=TRUE
-            BUILD_COMMAND ${_dnnl_build_cmd}
-            BUILD_BYPRODUCTS "<BINARY_DIR>/src/Release/${DNNL_LIB_NAME}"
-            INSTALL_COMMAND ""
-        )
     else()
         set(DNNL_LIB_NAME "libdnnl.a")
         ExternalProject_Add(oneDNN_build
@@ -90,7 +124,12 @@ if(ONEDNN_STATIC)
     file(MAKE_DIRECTORY "${ONEDNN_BINARY_DIR}/include")
 
     if(WIN32)
-        set(_lib_dir "${ONEDNN_BINARY_DIR}/src/Release")
+        if(CMAKE_GENERATOR MATCHES "Ninja")
+            # single-config: dnnl.lib lands in src/, not src/Release/
+            set(_lib_dir "${ONEDNN_BINARY_DIR}/src")
+        else()
+            set(_lib_dir "${ONEDNN_BINARY_DIR}/src/Release")
+        endif()
     else()
         set(_lib_dir "${ONEDNN_BINARY_DIR}/src")
     endif()
