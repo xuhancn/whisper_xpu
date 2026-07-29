@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <wx/wx.h>
 #include <wx/textctrl.h>
@@ -6,8 +6,11 @@
 #include <wx/clipbrd.h>
 #include <memory>
 #include <atomic>
+#include <string>
+#include <thread>
 #include "device_detect.h"
 #include "audio_capture.h"
+#include "src/transcription_scheduler.h"   // SchedulerStatus, SchedulerState
 
 namespace whisper_xpu {
     class Engine;
@@ -15,7 +18,6 @@ namespace whisper_xpu {
 }
 
 class AudioCapture;
-class TranscriptionScheduler;
 
 // ── Status bar field indices ──
 // Layout: [Mic info       ] [Device     ] [Model           ] [⚙]
@@ -27,6 +29,11 @@ enum StatusField {
     STATUS_FIELDS_COUNT
 };
 
+// AppFrame is the VIEW layer in the Model-View-Sync split.  The scheduler is
+// a pure data/command API; AppFrame owns a status-sync thread that polls
+// query_status() every 100ms and marshals changes to the UI via CallAfter.
+// The wx main thread is a pure event loop — it renders SchedulerStatus and
+// sends start/stop/reload commands; it never touches scheduler internals.
 class AppFrame : public wxFrame {
 public:
     AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size,
@@ -52,7 +59,7 @@ private:
     wxButton*       m_clearBtn;         // clear transcription text
     wxButton*       m_copyBtn;          // copy to clipboard
 
-    // ── Settings state ──
+    // ── Settings state (persisted to whisper_xpu.ini) ──
     int         m_micIndex    = kMicDefault;
     int         m_deviceIndex = kDeviceAuto;
     std::string m_modelPath;
@@ -62,31 +69,31 @@ private:
     std::vector<whisper_xpu::DeviceInfo> m_deviceList;
     std::vector<AudioDeviceInfo>         m_micList;
 
-    // ── Helpers ──
-    void UpdateStatusBar();
-    bool LoadEngine(const std::string& path);
-    // Disable the Record button + show a busy/loading state in the status bar
-    // while the engine is being (re)loaded (Engine ctor + GPU warmup can take
-    // ~14s on first-kernel JIT).  Keeps the user from starting a recording
-    // into a half-loaded engine, and signals "not ready" instead of a frozen
-    // window.  Record stays disabled until the engine is ready.
-    void SetLoading(bool loading);
-    // One-time SYCL/GPU warmup: runs a tiny throwaway whisper_full on the main
-    // thread so the Level Zero runtime resolves the decode kernels BEFORE the
-    // scheduler's 4 worker threads issue their first GPU compute.  Without it,
-    // the workers' first concurrent GPU decode fails ("whisper_full_with_state:
-    // failed to decode") and the app AVs in sycl8.dll (0xc0000005).  Verified
-    // via tests/streaming_pipeline/test_app_seq{,_warm}.cpp: no-warmup → 0 chars
-    // + 84s hang/AV; warmup → real text, ~206ms/window.  test_pipeline passes
-    // only because it calls transcribe_file() before start_no_capture().
-    void WarmupGpu();
-
-    // ── Engine / audio ──
-    std::unique_ptr<whisper_xpu::Engine> m_engine;
+    // ── Model-View-Sync ──
+    // The scheduler: pure data/command API.  AppFrame owns it but only calls
+    // its public methods (start/stop/reload/query_status) from the wx thread
+    // and the sync thread.
     std::unique_ptr<TranscriptionScheduler> m_scheduler;
     std::atomic<bool> m_recording{false};
-    std::atomic<bool> m_gpuWarmed{false};
-    std::atomic<bool> m_loading{false};   // engine (re)loading + warmup in progress
+
+    // Status-sync thread (owned by the UI, NOT the scheduler).  Polls
+    // query_status() @100ms; on change, marshals the snapshot to RefreshUI
+    // via CallAfter.  Stopped in OnClose before the scheduler is destroyed.
+    std::thread      m_syncThread;
+    std::atomic<bool> m_stopSync{false};
+    SchedulerStatus   m_lastStatus;   // for no-op-poll skip (compared w/ operator==)
+    void sync_loop();
+    void RefreshUI(const SchedulerStatus& s);   // runs on the wx thread (CallAfter)
+
+    // Render the status bar (mic + device + model).  Called by RefreshUI and
+    // by the static init paths.
+    void UpdateStatusBar();
+    // Load/save the persistent settings (model/device/mic/zh/hotkey) to
+    // whisper_xpu.ini so selection survives app restarts.  The reload itself
+    // is immediate (Settings OK → m_scheduler->reload); the file is just for
+    // the next launch.
+    void LoadSettings();
+    void SaveSettings() const;
 
     wxDECLARE_EVENT_TABLE();
 };

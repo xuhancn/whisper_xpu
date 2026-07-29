@@ -9,6 +9,10 @@
 #include <wx/msgdlg.h>
 #include <wx/statbox.h>
 #include <wx/filename.h>
+#include <wx/config.h>      // wxFileConfig-backed wxConfigBase for whisper_xpu.ini
+#include <wx/log.h>
+#include <chrono>
+#include <thread>
 
 wxBEGIN_EVENT_TABLE(AppFrame, wxFrame)
     EVT_CLOSE(AppFrame::OnClose)
@@ -34,14 +38,6 @@ static std::vector<AudioDeviceInfo> safe_enum_audio() {
     }
 }
 
-static whisper_xpu::Engine* safe_create_engine(const std::string& path, int device) {
-    try {
-        return new whisper_xpu::Engine(path, device);
-    } catch (const std::exception&) {
-        return nullptr;
-    }
-}
-
 // ──────────────────────────────────────────
 //  Construction / Destruction
 // ──────────────────────────────────────────
@@ -56,6 +52,11 @@ AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size
     SetMinSize(wxSize(600, 350));
     SetSize(900, 600);
 
+    // Persisted settings: if no --model/--device on the CLI, load the last
+    // selection from whisper_xpu.ini so the user's choice survives restarts.
+    // (CLI args, when present, still win.)
+    LoadSettings();
+
     // Populate cached device/mic lists and update status bar.
     // SYCL device enumeration is deferred to OnIdleInit (after event
     // loop starts) via whisper_xpu_sycl_core.dll.  The DLL is
@@ -63,9 +64,27 @@ AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size
     m_micList = safe_enum_audio();
     UpdateStatusBar();
 
-    // Load engine if a model was provided on the command line
-    if (!m_modelPath.empty())
-        LoadEngine(m_modelPath);
+    // Construct the scheduler (Model layer) — it OWNS the engine and loads the
+    // model on a BACKGROUND thread from its ctor.  This never blocks the GUI
+    // thread.  on_text is the merger→UI data delivery callback (marshaled to
+    // the wx thread via CallAfter inside the callback — the scheduler itself
+    // has no wx knowledge).  The UI observes state via the sync thread below.
+    m_scheduler = std::make_unique<TranscriptionScheduler>(
+        [this](const std::string& text) {  // on_text: merger thread
+            std::string shown = zh_converter().convert(text);
+            m_transcriptText->CallAfter([this, shown]() {
+                m_transcriptText->AppendText(wxString::FromUTF8(shown) + wxT("\n"));
+                m_transcriptText->Update();
+            });
+        },
+        m_modelPath,
+        m_deviceIndex);
+
+    // Status-sync thread (View layer's poller).  Polls query_status() @100ms;
+    // on change, marshals the snapshot to RefreshUI via CallAfter.  Owned by
+    // the UI (the scheduler has no threads-for-UI).  Stopped in OnClose before
+    // the scheduler is destroyed.
+    m_syncThread = std::thread(&AppFrame::sync_loop, this);
 
     // Deferred SYCL device enumeration after event loop is running
     Bind(wxEVT_IDLE, &AppFrame::OnIdleInit, this);
@@ -85,7 +104,77 @@ void AppFrame::OnIdleInit(wxIdleEvent& event) {
     event.Skip();
 }
 
+// ──────────────────────────────────────────
+// Status-sync thread (View layer's poller)
+// ──────────────────────────────────────────
+
+void AppFrame::sync_loop() {
+    // Polls the scheduler's pure query_status() every 100ms; on any change,
+    // marshals the snapshot to the wx thread via CallAfter(RefreshUI).  This is
+    // the ONLY place that turns scheduler data into UI updates, and it owns no
+    // scheduler internals — just the read-only snapshot.  Exits when m_stopSync
+    // is set (OnClose/~AppFrame).
+    while (!m_stopSync.load()) {
+        if (m_scheduler) {
+            SchedulerStatus s = m_scheduler->query_status();
+            if (s != m_lastStatus) {
+                m_lastStatus = s;
+                // Capture by value (small POD-ish struct) so the snapshot is
+                // stable across the CallAsync boundary regardless of later polls.
+                this->CallAfter([this, s]() { RefreshUI(s); });
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+}
+
+void AppFrame::RefreshUI(const SchedulerStatus& s) {
+    // Runs on the wx thread (via CallAfter).  Pure view: render the snapshot +
+    // send no commands.  State → status-bar text + button label/enable.
+    UpdateStatusBar();   // device/model fields reflect the latest snapshot
+    switch (s.state) {
+        case SchedulerState::Idle:
+            SetStatusText("No model loaded", STATUS_MIC);
+            m_recordBtn->SetLabel("Record");
+            m_recordBtn->Enable(false);
+            break;
+        case SchedulerState::Loading:
+            SetStatusText("Loading model…", STATUS_MIC);
+            m_recordBtn->SetLabel("Record");
+            // Record stays enabled: pressing it during load starts capture
+            // immediately; the pipeline launches when warmup finishes.
+            m_recordBtn->Enable(true);
+            break;
+        case SchedulerState::Ready:
+            SetStatusText("GPU Ready", STATUS_MIC);
+            m_recordBtn->SetLabel("Record");
+            m_recordBtn->Enable(true);
+            break;
+        case SchedulerState::Recording:
+            SetStatusText("Recording…", STATUS_MIC);
+            m_recordBtn->SetLabel("Stop");
+            m_recordBtn->Enable(true);
+            m_recording.store(true);
+            break;
+        case SchedulerState::Failed:
+            SetStatusText("Engine load failed", STATUS_MIC);
+            m_recordBtn->SetLabel("Record");
+            m_recordBtn->Enable(false);
+            // Only show the error dialog once per failure: track via a flag
+            // on m_lastStatus (Failed → Failed repeats won't re-show because
+            // query_status returns the same snapshot ⇒ no re-call).  The first
+            // Failed transition surfaces here.
+            wxLogMessage("[app] engine load failed (see scheduler log)");
+            break;
+    }
+}
+
 AppFrame::~AppFrame() {
+    // Stop the sync thread FIRST so it doesn't query a dying scheduler.  Then
+    // stop any recording; the scheduler's dtor (m_scheduler unique_ptr) aborts
+    // + joins the load thread and frees the engine.
+    m_stopSync.store(true);
+    if (m_syncThread.joinable()) m_syncThread.join();
     if (m_recording && m_scheduler)
         m_scheduler->stop();
 }
@@ -150,9 +239,9 @@ void AppFrame::CreateControls() {
     m_copyBtn->Bind(wxEVT_BUTTON, &AppFrame::OnCopy, this);
     GetStatusBar()->Bind(wxEVT_LEFT_DOWN, &AppFrame::OnStatusBarClick, this);
 
-    // Record starts DISABLED — enabled by LoadEngine/SetLoading(false) once a
-    // model is loaded + GPU is primed.  Prevents clicking Record before the
-    // engine is ready (the ctor's LoadEngine runs immediately after this).
+    // Record starts DISABLED — enabled by RefreshUI once the sync thread
+    // reports a usable state (Loading/Ready).  RefreshUI (driven by the sync
+    // thread's query_status poll) owns all button enable/disable + label.
     m_recordBtn->Disable();
 }
 
@@ -218,110 +307,65 @@ void AppFrame::UpdateStatusBar() {
     }
     SetStatusText(devLabel, STATUS_DEVICE);
 
-    // Model field
+    // Model field — render from the latest status snapshot (owned by the sync
+    // thread) or a fresh query.  m_lastStatus is written by the sync thread;
+    // reading it here (on the wx thread) is a benign plain read of plain
+    // data — RefreshUI is the authoritative renderer, this is just for the
+    // static-init paints before the sync thread has posted.
+    SchedulerStatus s = m_scheduler ? m_scheduler->query_status() : SchedulerStatus{};
     wxString modelLabel = "No model";
-    if (!m_modelPath.empty()) {
-        modelLabel = wxFileName(m_modelPath).GetFullName();
-        if (m_loading.load()) {
-            modelLabel += " [loading…]";
-        } else if (m_engine) {
-            modelLabel += m_engine->is_gpu_enabled()
-                ? " [GPU]"
-                : " [CPU]";
+    if (!s.model_name.empty()) {
+        modelLabel = s.model_name;
+        switch (s.state) {
+            case SchedulerState::Loading: modelLabel += " [loading…]"; break;
+            case SchedulerState::Ready:
+            case SchedulerState::Recording:
+                modelLabel += s.device_desc.find("CPU") == std::string::npos
+                              ? " [GPU]" : " [CPU]";
+                break;
+            case SchedulerState::Failed:  modelLabel += " [failed]"; break;
+            default: break;
         }
     }
     SetStatusText(modelLabel, STATUS_MODEL);
 }
 
-bool AppFrame::LoadEngine(const std::string& path) {
-    if (m_recording && m_scheduler) {
-        m_scheduler->stop();
-        m_recording = false;
-        m_recordBtn->SetLabel("Record");
-    }
-
-    // Loading an engine + priming the GPU can take ~14s (first-kernel JIT).
-    // Disable Record for the whole load so the user can't start a recording
-    // into a half-loaded engine, and reflect "not ready" in the status bar.
-    // The busy cursor + window-disabler keep the (still GUI-thread, see
-    // WarmupGpu comment) blocking load from looking like a frozen hang —
-    // wxYield-via-wxWindowDisabler repaints the window while we block.
-    SetLoading(true);
-    m_modelPath = path;            // show the filename immediately
-    UpdateStatusBar();
-
-    bool ok = false;
-    {
-        // Re-enable on scope exit (success or failure), unless we're mid-load
-        // of a SECOND path — handled by the outer SetLoading(false).
-        wxBusyCursor busy;
-        m_engine.reset(safe_create_engine(path, m_deviceIndex));
-        if (!m_engine) {
-            wxMessageBox("Failed to initialize engine: SYCL runtime error.\n"
-                         "Make sure the Intel GPU driver and oneAPI runtime are installed.",
-                         "Error", wxOK | wxICON_ERROR);
-        } else {
-            ok = true;
-        }
-    }
-
-    if (ok) {
-        // The engine (re)loaded, so any prior GPU warmup is invalidated —
-        // re-prime now (still on the GUI thread — required by WarmupGpu).
-        m_gpuWarmed = false;
-        SetStatusText("Loading… (GPU warmup)", STATUS_MODEL);
-        WarmupGpu();
-    }
-    SetLoading(false);
-    UpdateStatusBar();
-    return ok;
-}
-
-void AppFrame::SetLoading(bool loading) {
-    m_loading.store(loading);
-    // Record must be unclickable while the engine isn't ready.
-    m_recordBtn->Enable(!loading);
-    if (loading) {
-        SetStatusText("Loading…", STATUS_MODEL);
-        // Process pending paints so the disabled state + status text render
-        // before the (blocking) Engine ctor / warmup runs on this thread.
-        wxYield();
-    }
-}
-
 // ──────────────────────────────────────────
-// GPU warmup
+//  Persistent settings (whisper_xpu.ini)
 // ──────────────────────────────────────────
 
-void AppFrame::WarmupGpu() {
-    // SEH-style guard: a warmup failure must NEVER crash the app on startup.
-    if (!m_engine) return;
-    if (m_gpuWarmed.load()) return;
-    // Only GPU engines need priming — CPU is unaffected.
-    if (!m_engine->is_gpu_enabled()) {
-        m_gpuWarmed = true;
-        return;
+void AppFrame::LoadSettings() {
+    // wxConfigBase (set up in main.cpp's OnInit as a wxFileConfig backed by
+    // whisper_xpu.ini beside the exe).  CLI --model/--device override the
+    // persisted values (checked in the ctor before calling this): if a CLI
+    // model_path was given, keep it; otherwise load the saved one.
+    wxConfigBase* cfg = wxConfigBase::Get();
+    if (!cfg) return;
+    if (m_modelPath.empty())
+        m_modelPath = cfg->Read("model", "").ToStdString();
+    if (m_deviceIndex == kDeviceAuto) {
+        // Only fall back to the saved device if the CLI didn't force one.  The
+        // ctor receives kDeviceAuto by default; a CLI --device sets a real one.
+        long saved = cfg->ReadLong("device", kDeviceAuto);
+        m_deviceIndex = (int)saved;
     }
+    m_micIndex  = (int)cfg->ReadLong("mic",   kMicDefault);
+    wxString hk = cfg->Read("hotkey", m_hotkeyStr);
+    if (!hk.IsEmpty()) m_hotkeyStr = hk;
+    long zh = cfg->ReadLong("zh", -1);
+    if (zh >= 0 && zh <= 2)
+        zh_converter().set_mode(static_cast<ZhConverter::Mode>(zh));
+}
 
-    // Feed ~1s of silence through transcribe_chunk: a real whisper_full pass
-    // (encoder + decoder) on the engine's shared context, run on THIS (main)
-    // thread.  The transcript is discarded; the point is to force the SYCL
-    // Level Zero runtime to resolve/register the compute kernels once, so the
-    // scheduler's worker threads (which share this context) don't hit a
-    // "failed to decode" / sycl8.dll AV on their first concurrent GPU op.
-    constexpr int kWarmupMs = 1000;          // 1s @ 16 kHz
-    constexpr int kWarmupN  = kWarmupMs * 16;
-    std::vector<float> silence(kWarmupN, 0.0f);
-    wxLogMessage("[warmup] priming GPU with 1s silence before first Record...");
-    try {
-        m_engine->transcribe_chunk(silence.data(), (int)silence.size());
-    } catch (const std::exception& e) {
-        // Non-fatal: the real Record will surface any genuine failure too.
-        wxLogMessage("[warmup] priming failed (non-fatal): %s", e.what());
-        return;   // leave m_gpuWarmed false so Record can retry
-    }
-    m_gpuWarmed = true;
-    wxLogMessage("[warmup] GPU primed OK");
+void AppFrame::SaveSettings() const {
+    wxConfigBase* cfg = wxConfigBase::Get();
+    if (!cfg) return;
+    cfg->Write("model",  wxString(m_modelPath));
+    cfg->Write("device", (long)m_deviceIndex);
+    cfg->Write("mic",    (long)m_micIndex);
+    cfg->Write("hotkey", m_hotkeyStr);
+    cfg->Write("zh",     (long)static_cast<int>(zh_converter().mode()));
+    cfg->Flush();
 }
 
 // ──────────────────────────────────────────
@@ -490,15 +534,24 @@ void AppFrame::ShowSettingsDialog() {
         m_modelPath   = newModelPath;
         m_hotkeyStr   = newHotkey;
         // Apply the Chinese-display mode immediately (takes effect on the next
-        // emitted chunk; not persisted — default Auto each launch).
+        // emitted chunk).
         if (zhSel >= 0 && zhSel <= 2)
             zh_converter().set_mode(static_cast<ZhConverter::Mode>(zhSel));
 
+        // Persist ALL settings so the next launch comes back to this selection.
+        SaveSettings();
         UpdateStatusBar();
 
-        // Re-init engine if device or model changed
-        if ((devChanged || modelChanged) && !m_modelPath.empty())
-            LoadEngine(m_modelPath);
+        // Immediate reload (never blocks the GUI): the scheduler stops any
+        // recording, aborts+joins the old load thread, drops the old engine,
+        // and starts a fresh background load.  The sync thread observes
+        // Loading → Ready/Failed and RefreshUI flips the status bar.
+        if ((devChanged || modelChanged) && !m_modelPath.empty()) {
+            m_scheduler->reload(m_modelPath, m_deviceIndex);
+        } else if (m_modelPath.empty() && m_scheduler) {
+            // Switched to no model — reload to an empty path drops the engine.
+            m_scheduler->reload(m_modelPath, m_deviceIndex);
+        }
     }
 }
 
@@ -507,54 +560,20 @@ void AppFrame::ShowSettingsDialog() {
 // ──────────────────────────────────────────
 
 void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
-    // CallAfter coalesces duplicate events into one.
+    // CallAfter coalesces duplicate events into one.  Pure command layer: send
+    // start/stop to the scheduler; RefreshUI (driven by the sync thread) owns
+    // the button label/status text based on query_status().  No status code here.
     CallAfter([this]() {
         if (!m_recording) {
-            // ── Start ──
-            if (!m_engine) {
+            // ── Start ──  If no model, ask for one; otherwise start() opens
+            // PortAudio immediately (model-independent) and defers the pipeline
+            // launch until warmup finishes — Record is instant even mid-load.
+            if (!m_scheduler || m_modelPath.empty()) {
                 wxMessageBox("Please load a model first (Settings).",
                              "No Model", wxOK | wxICON_INFORMATION);
                 return;
             }
-
-            // Defensive: ensure the GPU is primed even if LoadEngine's warmup
-            // was skipped (e.g. device changed in Settings without a reload, or
-            // the earlier warmup threw).  No-op if already warm.
-            WarmupGpu();
-
-            auto on_text = [this](const std::string& text) {
-                // Called from the merger thread → marshal to the UI thread.
-                //
-                // Apply the Chinese-display converter (Simplified/Traditional/
-                // Auto) BEFORE rendering.  whisper emits UTF-8 and lets the
-                // model pick the glyph set; the converter rewrites to the
-                // user's chosen form.  It's a no-op for Auto and for non-CJK
-                // text, so English passes through untouched.
-                std::string shown = zh_converter().convert(text);
-                //
-                // FromUTF8 (NOT wxString(text)): whisper emits UTF-8; on MSW
-                // wxString(std::string) converts via the system locale (GBK),
-                // mangling Chinese into mojibake.  FromUTF8 builds the wxString
-                // straight from the UTF-8 bytes so CJK renders correctly.
-                //
-                // AppendText (NOT WriteText): appends at the end, scrolls the
-                // new text into view, and repaints reliably under wxTE_RICH2
-                // on Windows — WriteText left the view stuck at the top and the
-                // control unreplainted (mic test: 312 chars emitted, UI empty).
-                // Update() forces an immediate synchronous repaint so each
-                // chunk appears right away.
-                m_transcriptText->CallAfter([this, shown]() {
-                    m_transcriptText->AppendText(wxString::FromUTF8(shown) + wxT("\n"));
-                    m_transcriptText->Update();
-                });
-            };
-
-            m_scheduler = std::make_unique<TranscriptionScheduler>(on_text);
-            // Borrow the app's m_engine as the pool's shared context: one
-            // read-only model copy for the whole session (4 per-worker states
-            // are created inside the scheduler, not 4 model loads).
-            if (!m_scheduler->start(m_micIndex, *m_engine)) {
-                m_scheduler.reset();
+            if (!m_scheduler->start(m_micIndex)) {
                 wxMessageBox(
                     "Could not open the microphone.\n\n"
                     "Common causes:\n"
@@ -562,20 +581,16 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
                     "  - Another app holds the mic exclusively\n"
                     "  - No input device is connected",
                     "Microphone Error", wxOK | wxICON_WARNING);
-                return;   // button stays "Record", m_recording stays false
+                return;   // button stays "Record"; sync thread will reset state
             }
-
-            m_recordBtn->SetLabel("Stop");
-            SetStatusText("Recording...", STATUS_MIC);
-            m_recording = true;
+            m_recording.store(true);
+            // The sync thread's next poll (≤100ms) flips the button to "Stop"
+            // and the status to Recording/Loading-as-appropriate.
         } else {
-            // ── Stop ──
+            // ── Stop ──  The engine survives stop() for the next Record.
             if (m_scheduler) m_scheduler->stop();
-            m_scheduler.reset();
-
-            m_recordBtn->SetLabel("Record");
-            SetStatusText("Mic: Default", STATUS_MIC);
-            m_recording = false;
+            m_recording.store(false);
+            // The sync thread flips the button back to "Record".
         }
     });
 }
@@ -606,9 +621,14 @@ void AppFrame::OnStatusBarClick(wxMouseEvent& ev) {
 }
 
 void AppFrame::OnClose(wxCloseEvent& event) {
+    // Stop the sync thread first so it stops polling before the scheduler is
+    // torn down.  (~AppFrame also does this, but OnClose runs first.)
+    m_stopSync.store(true);
+    if (m_syncThread.joinable()) m_syncThread.join();
+    // Stop any recording; then drop the scheduler (its dtor aborts + joins the
+    // load thread and frees the engine).
     if (m_recording && m_scheduler)
         m_scheduler->stop();
     m_scheduler.reset();
-    m_engine.reset();
     event.Skip();
 }
