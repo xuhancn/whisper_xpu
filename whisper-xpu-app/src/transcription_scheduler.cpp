@@ -2,6 +2,7 @@
 #include "src/sched_log.h"
 #include "../audio_capture.h"
 #include "engine.h"
+#include "device_detect.h"   // kDeviceCPU / kDeviceAuto + get_device_info
 
 #include <algorithm>
 #include <chrono>
@@ -9,6 +10,10 @@
 using namespace std::chrono_literals;
 
 // ── Pipeline constants (16 kHz mono) ──
+// WINDOW_NEW_S=5: the verified accuracy baseline.  warmup_states() now
+// removes the first-window cold-start stall (the JIT/buffer/lang slow paths),
+// so we no longer need a smaller window to mask it; keep 5s for correct
+// accuracy.  First-word latency is ~5s + compute, acceptable and stable.
 static constexpr int SR             = 16000;
 static constexpr int WINDOW_NEW_S   = 5;                          // new audio per window
 static constexpr int TAIL_S         = 1;                          // overlap tail from prev window
@@ -43,25 +48,82 @@ void TranscriptionScheduler::on_audio_cb(TranscriptionScheduler* self,
 // ────────────────────────────────────────────────────────────
 
 TranscriptionScheduler::TranscriptionScheduler(TextCallback on_text, size_t ring_capacity)
-    : m_on_text(std::move(on_text))
-    , m_ring(ring_capacity ? ring_capacity : (size_t)(10 * SR))
+    : m_ownsEngine(false)   // test path: engine borrowed via start_no_capture
+    , m_on_text(std::move(on_text))
+    , m_ring(ring_capacity ? ring_capacity : (size_t)(20 * SR))
 {
-    sched_log("[Scheduler] created (ring=%zu samples)", m_ring.capacity());
+    sched_log("[Scheduler] created (test path; ring=%zu samples)", m_ring.capacity());
+    // No background load thread — the test owns and borrows its own Engine.
+}
+
+TranscriptionScheduler::TranscriptionScheduler(TextCallback on_text,
+                                               std::string model_path,
+                                               int device_index,
+                                               size_t ring_capacity)
+    : m_ownsEngine(true)
+    , m_modelPath(std::move(model_path))
+    , m_deviceIndex(device_index)
+    , m_on_text(std::move(on_text))
+    , m_ring(ring_capacity ? ring_capacity : (size_t)(20 * SR))
+{
+    sched_log("[Scheduler] created (owner path; model='%s' dev=%d ring=%zu samples)",
+              m_modelPath.c_str(), m_deviceIndex, m_ring.capacity());
+    // Kick off the background model load immediately (never blocks the GUI).
+    // async_setup starts the load thread + bumps m_loadGeneration.
+    if (!m_modelPath.empty()) {
+        async_setup(m_modelPath, m_deviceIndex);
+    } else {
+        // No model configured yet — leave the engine null; the app (Settings)
+        // will surface "no model".  is_ready() stays false.
+        sched_log("[Scheduler] no model path — load thread not started");
+    }
 }
 
 TranscriptionScheduler::~TranscriptionScheduler() {
     if (m_recording) stop();
+    // If the background load thread is still running (e.g. the app closed
+    // during the startup load), abort it and join before freeing the engine.
+    // Bump the generation too so a stale load_loop exits its superseded checks.
+    if (m_ownsEngine && m_loadThread.joinable()) {
+        m_loadAbort.store(true);
+        m_loadGeneration.fetch_add(1);
+        m_workerCv.notify_all();
+        m_mergerCv.notify_all();
+        m_loadThread.join();
+    }
     join_thread(m_windowerThread);
     for (auto& t : m_workerThreads) join_thread(t);
     join_thread(m_mergerThread);
+    // The owned Engine is released here (unique_ptr dtor).  Per-worker states
+    // are freed in stop(); if load_loop() was still mid-init, the abort path
+    // below frees partial states before the engine goes.
     sched_log("[Scheduler] destroyed");
 }
 
 // ────────────────────────────────────────────────────────────
-// Per-worker state creation (shared by start / start_no_capture)
+// Active engine accessor (owned in the app path, borrowed in tests)
 // ────────────────────────────────────────────────────────────
 
+whisper_xpu::Engine* TranscriptionScheduler::engine() const {
+    // m_engine is the owned engine (app path); m_sharedEngine is borrowed
+    // (test path via start_no_capture).  Exactly one is set at any time.
+    // Guarded: reload()/dtor mutate these while the UI's query_status and the
+    // worker threads read them.  Workers run only while m_engineReady (reload
+    // stop()s them first), but query_status polls during Loading.
+    std::lock_guard<std::mutex> lk(m_engineMutex);
+    return m_engine ? m_engine.get() : m_sharedEngine;
+}
+
+// ────────────────────────────────────────────────────────────
+// Per-worker state creation (shared by start / start_no_capture / load_loop)
+// ────────────────────────────────────────────────────────────────────
+
 bool TranscriptionScheduler::init_states() {
+    whisper_xpu::Engine* eng = engine();
+    if (!eng) {
+        sched_log("[Scheduler] init_states: no engine");
+        return false;
+    }
     int hw = (int)std::thread::hardware_concurrency();
     if (hw < 1) hw = 4;
     m_nThreadsPerWorker = std::max(1, hw / POOL_SIZE);
@@ -71,28 +133,219 @@ bool TranscriptionScheduler::init_states() {
     m_states.reserve(POOL_SIZE);
     m_workerLang.resize(POOL_SIZE);  // empty ⇒ first window auto-detects
     for (int i = 0; i < POOL_SIZE; ++i) {
-        whisper_state* st = m_sharedEngine->create_state();
+        whisper_state* st = eng->create_state();
         if (!st) {
             sched_log("[Scheduler] state %d create failed — freeing partial", i);
-            for (whisper_state* s : m_states) m_sharedEngine->free_state(s);
+            for (whisper_state* s : m_states) eng->free_state(s);
             m_states.clear();
             m_workerLang.clear();
             return false;
         }
         m_states.push_back(st);
     }
-    sched_log("[Scheduler] pool: 1 shared Engine + %d states × %d threads = %d total (hw=%d)",
+    sched_log("[Scheduler] pool: 1 Engine + %d states × %d threads = %d total (hw=%d)",
               POOL_SIZE, m_nThreadsPerWorker, POOL_SIZE * m_nThreadsPerWorker, hw);
     return true;
 }
 
 // ────────────────────────────────────────────────────────────
-// Start (app / mic) and start_no_capture (headless / file replay)
+// Per-worker state warmup (called before threads start)
 // ────────────────────────────────────────────────────────────
 
-bool TranscriptionScheduler::start(int micIndex, whisper_xpu::Engine& sharedEngine) {
+void TranscriptionScheduler::warmup_states(const std::atomic<bool>* abort_flag) {
+    // 1s of silence @ 16 kHz — enough to trigger one full encoder+decoder
+    // pass through whisper_full_with_state on each worker's own state, priming
+    // the SYCL/Level Zero first-kernel JIT compile + per-state compute-buffer
+    // allocation BEFORE any real audio is queued.
+    //
+    // IMPORTANT: the language detection pass is primed too, but we deliberately
+    // use a THROWAWAY local `lang` (empty ⇒ auto-detect) and DO NOT write the
+    // result back into m_workerLang[i].  whisper auto-detecting on silence
+    // returns a default (typically "en") which, if cached, would pin every
+    // real Chinese window to English ⇒ garbage output.  Leaving m_workerLang[i]
+    // empty means the real first window still auto-detects on real speech; that
+    // detection is cheap now because the JIT/encoder cold path was already
+    // primed here.
+    //
+    // `abort_flag` (=&m_loadAbort from load_loop) lets reload() interrupt the
+    // warmup mid-pass so a stale load doesn't keep burning the GPU after a new
+    // setup has started.
+    constexpr int kWarmupN = 1 * SR;
+    std::vector<float> silence(kWarmupN, 0.0f);
+
+    whisper_xpu::Engine* eng = engine();
+    for (int i = 0; i < POOL_SIZE; ++i) {
+        if (abort_flag && abort_flag->load()) break;   // reload()/dtor raced in
+        if (!m_states[i] || !eng) continue;
+        std::string lang;  // throwaway — auto-detects on silence, result
+                           // discarded; m_workerLang[i] stays empty.
+        auto t0 = std::chrono::high_resolution_clock::now();
+        auto r = eng->transcribe_window_with_state(
+            m_states[i], m_nThreadsPerWorker, lang,
+            silence.data(), (int)silence.size(), abort_flag);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        const double ms = std::chrono::duration<double,std::milli>(t1-t0).count();
+        if (r.aborted) {
+            sched_log("[Scheduler] warmup state %d ABORTED (%.0fms)", i, ms);
+        } else {
+            sched_log("[Scheduler] warmup state %d OK (%.0fms, %zu segs) — lang left for real audio",
+                      i, ms, r.segments.size());
+        }
+    }
+    sched_log("[Scheduler] warmup done — JIT/buffer primed for all %d states",
+              POOL_SIZE);
+}
+
+// ────────────────────────────────────────────────────────────
+// Background model load (owner path — runs once/reload, off the GUI thread)
+// ────────────────────────────────────────────────────────────
+
+void TranscriptionScheduler::load_loop() {
+    // Snapshot the generation this load is for.  If reload()/async_setup()
+    // bumps m_loadGeneration (starting a newer setup) while we're still here,
+    // bail before touching shared state — the new load owns the engine now.
+    const unsigned gen = m_loadGeneration.load();
+    m_loading.store(true);   // query_status() reports Loading while we run
+    struct LoadingGuard {
+        std::atomic<bool>& flag;
+        ~LoadingGuard() { flag.store(false); }
+    } guard{m_loading};
+    sched_log("[Scheduler] load_loop: constructing Engine (model='%s' dev=%d, gen=%u)...",
+              m_modelPath.c_str(), m_deviceIndex, gen);
+
+    // The Engine ctor (model load + ggml alloc) lives inside the icpx-built
+    // core DLL, which SEH-guards any SYCL AV.  A try/catch (MSVC caller) turns
+    // a hard crash into a logged failure so the app stays alive.  Build into a
+    // local first (the ctor is slow), then publish under m_engineMutex so the
+    // UI's query_status sees a stable pointer.
+    bool failed = false;
+    std::unique_ptr<whisper_xpu::Engine> built;
+    try {
+        built = std::make_unique<whisper_xpu::Engine>(m_modelPath, m_deviceIndex);
+    } catch (const std::exception& e) {
+        sched_log("[Scheduler] load_loop: Engine ctor FAILED: %s", e.what());
+        failed = true;
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_engineMutex);
+        m_engine = std::move(built);
+    }
+    if (m_loadGeneration.load() != gen) {
+        sched_log("[Scheduler] load_loop: superseded post-ctor — exiting");
+        return;   // a newer reload owns the engine now
+    }
+    if (failed || !m_engine) {
+        m_engineFailed.store(true);
+        return;
+    }
+    if (m_loadAbort.load()) { sched_log("[Scheduler] load_loop: aborted post-ctor"); return; }
+
+    // Create the 4 per-worker states on the owned engine, then warm up each
+    // (SYCL JIT + buffer alloc).  This is the slow (~10-25s) part but it runs
+    // here, never on the GUI thread.  No pipeline workers exist yet, so the
+    // GPU is touched by exactly one thread — safe.  Pass &m_loadAbort so a
+    // reload can interrupt the warmup mid-pass.
+    if (!init_states()) {
+        sched_log("[Scheduler] load_loop: init_states failed");
+        m_engineFailed.store(true);
+        return;
+    }
+    if (m_loadGeneration.load() != gen) {
+        sched_log("[Scheduler] load_loop: superseded post-init_states — exiting");
+        return;
+    }
+    warmup_states(&m_loadAbort);
+    if (m_loadGeneration.load() != gen || m_loadAbort.load()) {
+        sched_log("[Scheduler] load_loop: superseded/aborted post-warmup — exiting");
+        return;
+    }
+
+    // Engine + states + JIT are all primed → mark ready and, if Record was
+    // already pressed (capture active), launch the pipeline threads now.
+    {
+        std::lock_guard<std::mutex> lk(m_launchMutex);
+        m_engineReady.store(true);
+    }
+    sched_log("[Scheduler] load_loop: engine ready (gen=%u)", gen);
+    launch_threads_if_ready();
+}
+
+bool TranscriptionScheduler::async_setup(const std::string& model_path, int device_index) {
+    if (model_path.empty()) {
+        sched_log("[Scheduler] async_setup: empty model path — not loading");
+        return false;
+    }
+    m_modelPath = model_path;
+    m_deviceIndex = device_index;
+    m_engineFailed.store(false);
+    // Cache the basename for query_status (read by the sync thread under
+    // m_engineMutex; computing it here on the wx thread keeps the read tear-free).
+    {
+        std::lock_guard<std::mutex> lk(m_engineMutex);
+        if (m_modelPath.empty()) m_modelName.clear();
+        else {
+            auto pos = m_modelPath.find_last_of("\\/");
+            m_modelName = (pos == std::string::npos) ? m_modelPath
+                                                     : m_modelPath.substr(pos + 1);
+        }
+    }
+    // Bump the generation so any in-flight (stale) load_loop bails out, then
+    // start the new one.  If a load is already running it's joined first by the
+    // caller (reload); a bare async_setup when nothing is running just starts.
+    m_loadGeneration.fetch_add(1);
+    m_loadAbort.store(false);
+    if (m_loadThread.joinable()) {
+        // Shouldn't happen (reload joins first), but be safe: abort + join.
+        m_loadAbort.store(true);
+        m_loadThread.join();
+        m_loadAbort.store(false);
+        m_loadGeneration.fetch_add(1);   // this load is fresh
+    }
+    m_loadThread = std::thread(&TranscriptionScheduler::load_loop, this);
+    sched_log("[Scheduler] async_setup: started (model='%s' dev=%d gen=%u)",
+              m_modelPath.c_str(), m_deviceIndex, m_loadGeneration.load());
+    return true;
+}
+
+void TranscriptionScheduler::reload(const std::string& model_path, int device_index) {
+    sched_log("[Scheduler] reload: model='%s' dev=%d", model_path.c_str(), device_index);
+    // 1. Stop any recording (joins the pipeline threads + frees the states).
+    if (m_recording) stop();
+    // 2. Abort + join the background load thread so it's not touching the GPU /
+    //    m_engine when we drop the old engine below.
+    if (m_loadThread.joinable()) {
+        m_loadAbort.store(true);
+        m_workerCv.notify_all();
+        m_mergerCv.notify_all();
+        m_loadThread.join();
+        m_loadAbort.store(false);
+    }
+    // 3. Drop the old Engine + states + ready flag.  (States were freed in
+    //    stop() if we were recording; if we were just idle-but-ready, free
+    //    them now on the caller thread — safe: no pipeline/workers running.)
+    //    Hold m_engineMutex so query_status doesn't read a half-reset engine.
+    {
+        std::lock_guard<std::mutex> lk(m_engineMutex);
+        whisper_xpu::Engine* eng = m_engine.get();
+        if (eng) for (whisper_state* st : m_states) eng->free_state(st);
+        m_states.clear();
+        m_workerLang.clear();
+        m_engine.reset();
+    }
+    m_engineReady.store(false);
+    m_engineFailed.store(false);
+    m_captureActive.store(false);
+    m_stopping.store(false);
+    // 4. Start the new setup on a fresh background thread.
+    async_setup(model_path, device_index);
+}
+
+// ────────────────────────────────────────────────────────────
+// start (app path — capture now, pipeline when ready)
+// ────────────────────────────────────────────────────────────
+
+bool TranscriptionScheduler::start(int micIndex) {
     if (m_recording) return true;
-    m_sharedEngine = &sharedEngine;
 
     m_stopping = false;
     m_nextEmit = 0;
@@ -101,36 +354,42 @@ bool TranscriptionScheduler::start(int micIndex, whisper_xpu::Engine& sharedEngi
     m_mergerQueue.clear();
     m_ring.clear();
     m_dispatched = m_completed = m_workersUsed = 0;
-    m_segsKept = m_segsDropped = 0; m_charsEmitted = 0; m_lastStopMs = 0;
+    m_segsKept = m_segsDropped = 0; m_lastStopMs = 0;
+    m_totalChars.store(0);   // per-session char count (stats().total_chars + query_status)
 
-    if (!init_states()) { m_sharedEngine = nullptr; return false; }
-
+    // Open PortAudio FIRST — it's model-independent and fast (<100ms).  Audio
+    // flows into the ring immediately so no early speech is lost while the
+    // background load finishes.  If the load isn't done yet, the captured PCM
+    // buffers in the 20s ring until launch_threads_if_ready() spawns workers.
     m_capture = std::make_unique<AudioCapture>();
     m_capture->set_callback([this](const float* s, size_t n) -> size_t {
         on_audio_cb(this, s, n);
         return n;
     });
     bool ok = m_capture->start(micIndex, SR, 512);
-    sched_log("[Scheduler] start mic=%d ok=%d", micIndex, (int)ok);
+    sched_log("[Scheduler] start mic=%d ok=%d (engineReady=%d)",
+              micIndex, (int)ok, (int)m_engineReady.load());
     if (!ok) {
-        for (whisper_state* st : m_states) m_sharedEngine->free_state(st);
-        m_states.clear(); m_workerLang.clear();
-        m_capture.reset(); m_sharedEngine = nullptr;
+        m_capture.reset();
         return false;
     }
 
     m_recording = true;
-    m_windowerThread = std::thread(&TranscriptionScheduler::windower_loop, this);
-    m_workerThreads.clear();
-    m_workerThreads.reserve(POOL_SIZE);
-    for (int i = 0; i < POOL_SIZE; ++i)
-        m_workerThreads.emplace_back(&TranscriptionScheduler::worker_loop, this, i);
-    m_mergerThread = std::thread(&TranscriptionScheduler::merger_loop, this);
+    {
+        std::lock_guard<std::mutex> lk(m_launchMutex);
+        m_captureActive.store(true);
+    }
+    // If the engine is already loaded + warmed, launch the pipeline now
+    // (the fast, every-Record-after-the-first path).  Otherwise load_loop()
+    // will call this once it finishes.
+    launch_threads_if_ready();
     return true;
 }
 
 bool TranscriptionScheduler::start_no_capture(whisper_xpu::Engine& sharedEngine) {
     if (m_recording) return true;
+    // Headless/test path: the caller owns the Engine and borrows it.  No
+    // background load thread, no AudioCapture.  m_ownsEngine stays false.
     m_sharedEngine = &sharedEngine;
 
     m_stopping = false;
@@ -140,15 +399,26 @@ bool TranscriptionScheduler::start_no_capture(whisper_xpu::Engine& sharedEngine)
     m_mergerQueue.clear();
     m_ring.clear();
     m_dispatched = m_completed = m_workersUsed = 0;
-    m_segsKept = m_segsDropped = 0; m_charsEmitted = 0; m_lastStopMs = 0;
+    m_segsKept = m_segsDropped = 0; m_lastStopMs = 0;
+    m_totalChars.store(0);
 
     if (!init_states()) { m_sharedEngine = nullptr; return false; }
+
+    // Same warmup as the app path — prime JIT/buffer/lang so file-replay
+    // workers don't backlog behind worker 0's first-window slow paths.  No
+    // abort flag in the test path (no reload thread to race).
+    warmup_states(nullptr);
 
     // No AudioCapture — caller feeds the ring via feed_audio().  Log so it's
     // clear in headless runs that the mic was intentionally skipped.
     sched_log("[Scheduler] start_no_capture (headless; feed via feed_audio)");
 
     m_recording = true;
+    {
+        std::lock_guard<std::mutex> lk(m_launchMutex);
+        m_engineReady.store(true);   // borrowed engine is ready by construction
+        // (no capture in headless mode; launch directly below)
+    }
     m_windowerThread = std::thread(&TranscriptionScheduler::windower_loop, this);
     m_workerThreads.clear();
     m_workerThreads.reserve(POOL_SIZE);
@@ -156,6 +426,47 @@ bool TranscriptionScheduler::start_no_capture(whisper_xpu::Engine& sharedEngine)
         m_workerThreads.emplace_back(&TranscriptionScheduler::worker_loop, this, i);
     m_mergerThread = std::thread(&TranscriptionScheduler::merger_loop, this);
     return true;
+}
+
+// ────────────────────────────────────────────────────────────
+// launch_threads_if_ready — rendezvous: spawn pipeline threads once both
+// the engine is ready AND capture is active.  Idempotent + guarded.
+// ────────────────────────────────────────────────────────────
+
+void TranscriptionScheduler::launch_threads_if_ready() {
+    // Headless path already launched its threads inside start_no_capture;
+    // m_captureActive is false there, so this guard is a no-op for tests.
+    if (!m_recording.load()) return;
+    bool launch = false;
+    {
+        std::lock_guard<std::mutex> lk(m_launchMutex);
+        if (m_engineReady.load() && m_captureActive.load() && m_windowerThread.get_id() == std::thread::id()) {
+            launch = true;
+        }
+    }
+    if (!launch) return;
+
+    // The per-worker states may have been freed by a previous stop() (the
+    // owned Engine survives stop() for reuse, but states don't).  Recreate
+    // them now if needed — cheap vs. the model load (just 4 KV-cache allocs);
+    // the SYCL JIT is already cached from warmup_states() so no re-prime.
+    if (m_states.empty()) {
+        if (!init_states()) {
+            sched_log("[Scheduler] launch_threads_if_ready: init_states failed — not launching");
+            return;
+        }
+    }
+
+    // Only launch once: the m_windowerThread.get_id()==id check above (under
+    // the lock) guarantees a single caller wins.  Capture is open, the engine
+    // is primed — spin the windower/worker/merger threads to drain the ring.
+    sched_log("[Scheduler] launching pipeline threads (engine ready + capture active)");
+    m_windowerThread = std::thread(&TranscriptionScheduler::windower_loop, this);
+    m_workerThreads.clear();
+    m_workerThreads.reserve(POOL_SIZE);
+    for (int i = 0; i < POOL_SIZE; ++i)
+        m_workerThreads.emplace_back(&TranscriptionScheduler::worker_loop, this, i);
+    m_mergerThread = std::thread(&TranscriptionScheduler::merger_loop, this);
 }
 
 void TranscriptionScheduler::feed_audio(const float* samples, size_t count) {
@@ -185,14 +496,21 @@ void TranscriptionScheduler::stop() {
         m_capture->stop();
         m_capture.reset();
     }
-    // Free the per-worker states we own; the shared Engine is borrowed from
-    // the app and stays alive (one model copy for the whole session).  States
+    // Free the per-worker states; the Engine itself survives stop() (owned:
+    // reused for the next Record; borrowed: owned by the test caller).  States
     // must be freed only after workers have joined — done above — so none is
     // mid-whisper_full_with_state.
-    for (whisper_state* st : m_states) m_sharedEngine->free_state(st);
+    whisper_xpu::Engine* eng = engine();
+    if (eng) {
+        for (whisper_state* st : m_states) eng->free_state(st);
+    }
     m_states.clear();
     m_workerLang.clear();
+    // Borrowed-engine pointer (test path) is cleared so a later owner-path
+    // start() doesn't read a dangling m_sharedEngine; the owned m_engine and
+    // m_engineReady flag are NOT reset — the engine stays ready for reuse.
     m_sharedEngine = nullptr;
+    m_captureActive.store(false);
     m_lastStopMs = now_ms() - t0;
     sched_log("[Scheduler] stopped (%dms)", m_lastStopMs.load());
 }
@@ -279,7 +597,7 @@ void TranscriptionScheduler::worker_loop(int workerId) {
         }
         m_workersUsed.fetch_or(1 << workerId);
 
-        auto r = m_sharedEngine->transcribe_window_with_state(
+        auto r = engine()->transcribe_window_with_state(
             m_states[workerId], m_nThreadsPerWorker, m_workerLang[workerId],
             job.pcm.data(), (int)job.pcm.size(), &m_stopping);
         const size_t segs  = r.segments.size();
@@ -380,7 +698,7 @@ void TranscriptionScheduler::merger_loop() {
             if (!text.empty() && text.back() == ' ') text.pop_back();
 
             if (!text.empty()) {
-                m_charsEmitted.fetch_add((long)text.size());
+                m_totalChars.fetch_add((long)text.size());   // stats + query_status
                 if (m_on_text) m_on_text(text);
             }
             if (m_on_chunk) m_on_chunk(idx, text);
@@ -403,7 +721,7 @@ TranscriptionScheduler::PipelineStats TranscriptionScheduler::stats() const {
     s.workers_used_mask  = m_workersUsed.load();
     s.segments_kept      = m_segsKept.load();
     s.segments_dropped   = m_segsDropped.load();
-    s.total_chars        = m_charsEmitted.load();
+    s.total_chars        = m_totalChars.load();
     s.last_stop_ms       = m_lastStopMs.load();
     {
         std::lock_guard<std::mutex> lk(m_mergerMutex);
@@ -412,3 +730,37 @@ TranscriptionScheduler::PipelineStats TranscriptionScheduler::stats() const {
     }
     return s;
 }
+
+SchedulerStatus TranscriptionScheduler::query_status() const {
+    // Pure data snapshot — the UI's sync thread calls this every 100ms.  State
+    // precedence: Recording > Loading > Failed > Ready > Idle.  The exact
+    // field set is compared by SchedulerStatus::operator==, so no-op polls
+    // don't trigger a UI refresh.
+    SchedulerStatus s;
+    s.recording   = m_recording.load();
+    s.gpu_ready   = m_engineReady.load();
+    s.total_chars = m_totalChars.load();
+    // device_desc: owned engine (app path) or borrowed (test path).  Empty
+    // before the engine is constructed.  Guard against reload() mutating it.
+    {
+        std::lock_guard<std::mutex> lk(m_engineMutex);
+        if (m_engine)             s.device_desc = m_engine->device_description();
+        else if (m_sharedEngine)  s.device_desc = m_sharedEngine->device_description();
+        s.model_name = m_modelName;   // cached basename (set in async_setup)
+    }
+
+    if (m_recording.load()) {
+        s.state = SchedulerState::Recording;
+    } else if (m_loading.load() && !m_engineReady.load() && !m_engineFailed.load()) {
+        // load_loop is running and hasn't reached ready/failed yet.
+        s.state = SchedulerState::Loading;
+    } else if (m_engineFailed.load()) {
+        s.state = SchedulerState::Failed;
+    } else if (m_engineReady.load()) {
+        s.state = SchedulerState::Ready;
+    } else {
+        s.state = SchedulerState::Idle;
+    }
+    return s;
+}
+

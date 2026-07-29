@@ -1,6 +1,10 @@
 ﻿#include <wx/wx.h>
 #include <wx/intl.h>
 #include <wx/evtloop.h>
+#include <wx/config.h>
+#include <wx/fileconf.h>
+#include <wx/stdpaths.h>
+#include <wx/filename.h>
 #include <cstdlib>
 #include <cstdio>
 #include <io.h>
@@ -78,6 +82,20 @@ public:
 
         // ZES_ENABLE_SYSMAN=1 is set above — required by the Level Zero
         // loader to avoid a null-function-pointer crash in get_platforms().
+
+        // Set up wxConfigBase (global) backed by whisper_xpu.ini beside the
+        // exe, so AppFrame::LoadSettings/SaveSettings persist model/device/
+        // mic/zh/hotkey across restarts.  CLI args override the saved values.
+        {
+            wxFileName ini(wxStandardPaths::Get().GetExecutablePath());
+            ini.SetFullName("whisper_xpu.ini");
+            wxConfigBase::Set(new wxFileConfig(
+                "whisper_xpu", "xuhan",
+                ini.GetFullPath(),       // local file (read/write)
+                "",                      // no global file
+                wxCONFIG_USE_LOCAL_FILE | wxCONFIG_USE_RELATIVE_PATH));
+            // Don't auto-create-empty on read; the file appears on first save.
+        }
 
         AppFrame* frame = new AppFrame(
             "Whisper XPU",

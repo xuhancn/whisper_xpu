@@ -174,7 +174,7 @@ int main(int argc, char** argv) {
                     s.next_emit, expected_windows, s.windows_dispatched, s.windows_completed);
             last = s.next_emit;
         }
-        if (std::chrono::duration_cast<std::chrono::seconds>(clock::now() - t0).count() > 40) {
+        if (std::chrono::duration_cast<std::chrono::seconds>(clock::now() - t0).count() > 90) {
             fprintf(stderr, "  TIMEOUT at %d/%d\n", s.next_emit, expected_windows);
             break;
         }
