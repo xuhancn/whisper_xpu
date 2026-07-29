@@ -176,6 +176,10 @@ public:
 
     bool is_recording() const { return m_recording.load(); }
     bool is_ready() const { return m_engineReady.load(); }
+    // True if the windower/worker/merger pipeline threads are currently running
+    // (i.e. a real recording is draining the ring).  Public so tests + status
+    // can observe the launch gate without touching scheduler internals.
+    bool pipeline_running() const;
     // Snapshot of state + model/device names + gpu_ready/recording/total_chars.
     SchedulerStatus query_status() const;
 
@@ -201,6 +205,13 @@ private:
     void merger_loop();
     void load_loop();                          // background: Engine ctor + warmup
     static void join_thread(std::thread& t);
+    // Join a thread but never block longer than timeout_ms.  If it doesn't
+    // finish in time, log an error and return false WITHOUT detaching (a
+    // detached thread that touches m_engine would use-after-free across
+    // destruction).  The caller (reload/async_setup) then aborts the reload
+    // and keeps the old engine.  Polls m_loadThreadFinished (instance flag) so
+    // it must be non-static.
+    bool join_bounded(std::thread& t, int timeout_ms) const;
 
     // Active engine: the owned m_engine (app path) or the borrowed
     // m_sharedEngine (test path).  Exactly one is set at a time.  Returns
@@ -287,7 +298,13 @@ private:
     std::atomic<bool>           m_loadAbort{false};
     std::atomic<unsigned>       m_loadGeneration{0};   // bumped by reload/async_setup
     std::atomic<bool>           m_loading{false};      // load_loop is running (for query_status)
-    std::mutex                  m_launchMutex;          // guards launch_threads_if_ready + the flags below
+    // Set false when async_setup launches a load thread, true when load_loop
+    // exits.  join_bounded polls this to do a timed join WITHOUT detaching
+    // (detaching a thread that touches m_engine would use-after-free across
+    // destruction).  If the load doesn't finish in time, the reload aborts and
+    // keeps the old engine — safe.
+    std::atomic<bool>           m_loadThreadFinished{true};
+    mutable std::mutex          m_launchMutex;          // guards launch_threads_if_ready + the flags below (mutable: pipeline_running() const locks it)
     std::atomic<bool>           m_engineReady{false};   // warmup done
     std::atomic<bool>           m_captureActive{false}; // PortAudio open
     std::atomic<bool>           m_engineFailed{false};  // last load failed

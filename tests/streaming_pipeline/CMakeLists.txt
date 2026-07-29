@@ -76,6 +76,59 @@ if(WIN32 AND SYCL_LIBRARY_DIR)
 endif()
 whisper_xpu_copy_shared_libs(test_app_seq)
 
+# ── Robustness tests: rapid model switch, record-before-load, reload-while-
+# recording.  Validates the crash guards (bounded join, whole-sequence lock,
+# null-engine launch gate, clean stop-while-recording).
+add_executable(test_robust
+    test_robust.cpp
+    ${CMAKE_SOURCE_DIR}/whisper-xpu-app/src/transcription_scheduler.cpp
+    ${CMAKE_SOURCE_DIR}/whisper-xpu-app/src/sched_log.cpp
+    ${CMAKE_SOURCE_DIR}/whisper-xpu-app/audio_capture.cpp
+)
+target_include_directories(test_robust PRIVATE
+    ${CMAKE_SOURCE_DIR}/whisper-xpu-app
+    ${CMAKE_SOURCE_DIR}/whisper-xpu-core
+    ${CMAKE_SOURCE_DIR}/whisper-xpu-core/sycl_src
+    ${CMAKE_SOURCE_DIR}/third_party/whisper.cpp/include
+    ${CMAKE_SOURCE_DIR}/third_party/portaudio/include
+)
+target_compile_options(test_robust PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+target_compile_definitions(test_robust PRIVATE
+    TEST_WAV_DIR="${CMAKE_SOURCE_DIR}/tests/bench_vad"
+)
+target_link_libraries(test_robust PRIVATE
+    whisper_xpu_sycl_core
+    portaudio
+)
+if(WIN32)
+    target_link_libraries(test_robust PRIVATE winmm ole32 uuid)
+endif()
+add_custom_command(TARGET test_robust POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:whisper_xpu_sycl_core>
+        $<TARGET_FILE_DIR:test_robust>
+    COMMENT "Copying whisper_xpu_sycl_core.dll to test_robust output directory"
+)
+if(WIN32 AND SYCL_LIBRARY_DIR)
+    get_filename_component(_sycl_bin4 "${SYCL_LIBRARY_DIR}/../bin" ABSOLUTE)
+    set(_rt_dlls4 sycl7.dll sycl8.dll sycl9.dll svml_dispmd.dll libmmd.dll libiomp5md.dll
+        ur_win_proxy_loader.dll ur_loader.dll
+        ur_adapter_level_zero.dll ur_adapter_opencl.dll
+        umf.dll tcm.dll
+        ur_adapter_level_zero_v2.dll libhwloc-15.dll sycl-jit.dll)
+    foreach(_dll ${_rt_dlls4})
+        if(EXISTS "${_sycl_bin4}/${_dll}")
+            add_custom_command(TARGET test_robust POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${_sycl_bin4}/${_dll}"
+                    $<TARGET_FILE_DIR:test_robust>
+                COMMENT "Copying ${_dll} to test_robust output directory")
+        endif()
+    endforeach()
+endif()
+whisper_xpu_copy_shared_libs(test_robust)
+
 target_compile_options(test_pipeline PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 

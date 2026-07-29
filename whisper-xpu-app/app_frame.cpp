@@ -565,15 +565,26 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
     // the button label/status text based on query_status().  No status code here.
     CallAfter([this]() {
         if (!m_recording) {
-            // ── Start ──  If no model, ask for one; otherwise start() opens
-            // PortAudio immediately (model-independent) and defers the pipeline
-            // launch until warmup finishes — Record is instant even mid-load.
+            // ── Start ──  Pre-check the scheduler state to surface the right
+            // message (start() returning false is ambiguous: mic failure vs.
+            // engine failure).  Loading ⇒ buffer (capture + return); Failed ⇒
+            // no model will come; empty model ⇒ ask for one.
             if (!m_scheduler || m_modelPath.empty()) {
                 wxMessageBox("Please load a model first (Settings).",
                              "No Model", wxOK | wxICON_INFORMATION);
                 return;
             }
+            auto st = m_scheduler->query_status().state;
+            if (st == SchedulerState::Failed) {
+                wxMessageBox(
+                    "Model load failed. Check the model path and device in Settings,\n"
+                    "and make sure the Intel GPU driver / oneAPI runtime are installed.",
+                    "Model Load Failed", wxOK | wxICON_ERROR);
+                return;
+            }
             if (!m_scheduler->start(m_micIndex)) {
+                // start() returns false only on mic-open failure (Failed/
+                // empty-model handled above).  Loading is allowed (buffers).
                 wxMessageBox(
                     "Could not open the microphone.\n\n"
                     "Common causes:\n"

@@ -37,6 +37,31 @@ void TranscriptionScheduler::join_thread(std::thread& t) {
     if (t.joinable()) t.join();
 }
 
+bool TranscriptionScheduler::join_bounded(std::thread& t, int timeout_ms) const {
+    // Join without ever blocking the caller longer than timeout_ms.  A stuck
+    // load thread (e.g. hung in GPU JIT) must never hang the GUI.  We poll the
+    // m_loadThreadFinished flag (set when load_loop exits) in small slices;
+    // once it's true, join() returns instantly.  We NEVER detach — a detached
+    // thread that touches m_engine would use-after-free across destruction.
+    // If the load doesn't finish in time, the caller (reload/async_setup)
+    // keeps the old engine and skips starting a new load (returns false) —
+    // safe, if not ideal.
+    if (!t.joinable()) return true;   // nothing to join
+    const int step = 20;             // ms per poll
+    int waited = 0;
+    while (waited < timeout_ms && !m_loadThreadFinished.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(step));
+        waited += step;
+    }
+    if (!m_loadThreadFinished.load()) {
+        sched_log("[Scheduler] join_bounded: load thread did not finish within %dms — "
+                  "skipping (keeping old engine)", timeout_ms);
+        return false;   // do NOT join/detach; caller bails out of the reload
+    }
+    t.join();   // instant — the thread has exited
+    return true;
+}
+
 // Static PortAudio callback → pushes to ring buffer
 void TranscriptionScheduler::on_audio_cb(TranscriptionScheduler* self,
                                          const float* samples, size_t count) {
@@ -206,10 +231,12 @@ void TranscriptionScheduler::load_loop() {
     // bail before touching shared state — the new load owns the engine now.
     const unsigned gen = m_loadGeneration.load();
     m_loading.store(true);   // query_status() reports Loading while we run
-    struct LoadingGuard {
-        std::atomic<bool>& flag;
-        ~LoadingGuard() { flag.store(false); }
-    } guard{m_loading};
+    m_loadThreadFinished.store(false);  // join_bounded polls this
+    struct LoadExitGuard {
+        std::atomic<bool>& loading;
+        std::atomic<bool>& finished;
+        ~LoadExitGuard() { loading.store(false); finished.store(true); }
+    } guard{m_loading, m_loadThreadFinished};
     sched_log("[Scheduler] load_loop: constructing Engine (model='%s' dev=%d, gen=%u)...",
               m_modelPath.c_str(), m_deviceIndex, gen);
 
@@ -278,6 +305,14 @@ bool TranscriptionScheduler::async_setup(const std::string& model_path, int devi
     m_modelPath = model_path;
     m_deviceIndex = device_index;
     m_engineFailed.store(false);
+    // async_setup starts an owned load thread → this scheduler now owns its
+    // engine (even if it started life as a test-path borrowed-engine scheduler
+    // via reload()).  The dtor keys off m_ownsEngine to decide whether to
+    // join/teardown the load thread + owned engine, so flip it true here.
+    m_ownsEngine = true;
+    // A borrowed m_sharedEngine (test path) is no longer authoritative once we
+    // own m_engine — clear it so engine() returns the owned one once built.
+    m_sharedEngine = nullptr;
     // Cache the basename for query_status (read by the sync thread under
     // m_engineMutex; computing it here on the wx thread keeps the read tear-free).
     {
@@ -290,17 +325,27 @@ bool TranscriptionScheduler::async_setup(const std::string& model_path, int devi
         }
     }
     // Bump the generation so any in-flight (stale) load_loop bails out, then
-    // start the new one.  If a load is already running it's joined first by the
-    // caller (reload); a bare async_setup when nothing is running just starts.
+    // start the new one.  If a load is already running it's joined (bounded)
+    // first — but a bare async_setup when nothing is running just starts.
     m_loadGeneration.fetch_add(1);
     m_loadAbort.store(false);
     if (m_loadThread.joinable()) {
-        // Shouldn't happen (reload joins first), but be safe: abort + join.
+        // Defensive: a load is still running (reload normally joins first).
+        // Bounded join so a stuck load can't hang the GUI; if it doesn't
+        // finish, abort this async_setup (keep the old engine).
         m_loadAbort.store(true);
-        m_loadThread.join();
+        m_workerCv.notify_all();
+        m_mergerCv.notify_all();
+        if (!join_bounded(m_loadThread, 2000)) {
+            // Load thread stuck — give up on the reload, keep the old engine.
+            m_loadAbort.store(false);
+            sched_log("[Scheduler] async_setup: prev load didn't join — reload aborted");
+            return false;
+        }
         m_loadAbort.store(false);
         m_loadGeneration.fetch_add(1);   // this load is fresh
     }
+    m_loadThreadFinished.store(false);
     m_loadThread = std::thread(&TranscriptionScheduler::load_loop, this);
     sched_log("[Scheduler] async_setup: started (model='%s' dev=%d gen=%u)",
               m_modelPath.c_str(), m_deviceIndex, m_loadGeneration.load());
@@ -311,19 +356,27 @@ void TranscriptionScheduler::reload(const std::string& model_path, int device_in
     sched_log("[Scheduler] reload: model='%s' dev=%d", model_path.c_str(), device_index);
     // 1. Stop any recording (joins the pipeline threads + frees the states).
     if (m_recording) stop();
-    // 2. Abort + join the background load thread so it's not touching the GPU /
-    //    m_engine when we drop the old engine below.
+    // 2. Abort + bounded-join the background load thread so it's not touching
+    //    the GPU / m_engine when we drop the old engine below.  Bounded so a
+    //    stuck load can't hang the GUI (Settings OK path).  If it doesn't join,
+    //    KEEP the old engine + abort the reload (don't drop an engine a still-
+    //    running thread may be building/using).
     if (m_loadThread.joinable()) {
         m_loadAbort.store(true);
         m_workerCv.notify_all();
         m_mergerCv.notify_all();
-        m_loadThread.join();
+        if (!join_bounded(m_loadThread, 2000)) {
+            m_loadAbort.store(false);
+            sched_log("[Scheduler] reload: prev load didn't join — reload aborted, "
+                      "keeping old engine");
+            return;
+        }
         m_loadAbort.store(false);
     }
-    // 3. Drop the old Engine + states + ready flag.  (States were freed in
-    //    stop() if we were recording; if we were just idle-but-ready, free
-    //    them now on the caller thread — safe: no pipeline/workers running.)
-    //    Hold m_engineMutex so query_status doesn't read a half-reset engine.
+    // 3. Drop the old Engine + states + flags under m_engineMutex so the WHOLE
+    //    teardown is atomic vs query_status/workers.  (Previously the flags
+    //    were reset outside the lock, leaving a window where query_status saw
+    //    m_engineReady=true with m_engine=nullptr.)
     {
         std::lock_guard<std::mutex> lk(m_engineMutex);
         whisper_xpu::Engine* eng = m_engine.get();
@@ -331,12 +384,13 @@ void TranscriptionScheduler::reload(const std::string& model_path, int device_in
         m_states.clear();
         m_workerLang.clear();
         m_engine.reset();
+        m_engineReady.store(false);
+        m_engineFailed.store(false);
+        m_captureActive.store(false);
+        m_stopping.store(false);
     }
-    m_engineReady.store(false);
-    m_engineFailed.store(false);
-    m_captureActive.store(false);
-    m_stopping.store(false);
-    // 4. Start the new setup on a fresh background thread.
+    // 4. Start the new setup on a fresh background thread.  async_setup does
+    //    its own bounded join of any (now-joined) thread + launches load_loop.
     async_setup(model_path, device_index);
 }
 
@@ -346,6 +400,20 @@ void TranscriptionScheduler::reload(const std::string& model_path, int device_in
 
 bool TranscriptionScheduler::start(int micIndex) {
     if (m_recording) return true;
+
+    // Readiness gate: refuse only if the engine has FAILED (no model will come)
+    // or no model is configured.  During Loading we ALLOW capture — PortAudio
+    // is model-independent, audio buffers in the 20s ring, and the pipeline
+    // launches when load_loop sets m_engineReady (WeChat-style).  launch_threads_
+    // if_ready() is the hard gate that prevents worker spawn without an engine.
+    if (m_engineFailed.load()) {
+        sched_log("[Scheduler] start: engine load FAILED — refusing (check Settings)");
+        return false;
+    }
+    if (m_modelPath.empty()) {
+        sched_log("[Scheduler] start: no model configured — refusing");
+        return false;
+    }
 
     m_stopping = false;
     m_nextEmit = 0;
@@ -440,9 +508,24 @@ void TranscriptionScheduler::launch_threads_if_ready() {
     bool launch = false;
     {
         std::lock_guard<std::mutex> lk(m_launchMutex);
-        if (m_engineReady.load() && m_captureActive.load() && m_windowerThread.get_id() == std::thread::id()) {
-            launch = true;
+        // HARD GATE: never launch the pipeline unless the engine is ready AND
+        // capture is active AND we haven't already launched.  This is the real
+        // crash-prevention point for "Record before model ready": even though
+        // start() opens PortAudio during Loading (buffering), this gate blocks
+        // worker spawn until load_loop sets m_engineReady.
+        if (!m_engineReady.load() || !m_captureActive.load()) return;
+        if (m_windowerThread.get_id() != std::thread::id()) return;  // already launched
+        // Re-check the engine pointer under m_engineMutex — reload() could have
+        // dropped it between the m_engineReady check and here (a racing teardown
+        // sets m_engineReady=false under the same lock, but be paranoid).
+        {
+            std::lock_guard<std::mutex> elk(m_engineMutex);
+            if (!m_engine) {
+                sched_log("[Scheduler] launch_threads_if_ready: engine null — aborting launch");
+                return;
+            }
         }
+        launch = true;
     }
     if (!launch) return;
 
@@ -597,7 +680,17 @@ void TranscriptionScheduler::worker_loop(int workerId) {
         }
         m_workersUsed.fetch_or(1 << workerId);
 
-        auto r = engine()->transcribe_window_with_state(
+        // Hard null-guard: if a racing reload/teardown dropped the engine
+        // between the launch gate and here, bail (log + skip) instead of NPE.
+        // m_stopping is checked by the loop predicate; this guards the rare
+        // window where the engine goes null mid-run.
+        auto* eng = engine();
+        if (!eng) {
+            sched_log("[Scheduler] worker %d: engine null — skipping window %d",
+                      workerId, job.index);
+            continue;
+        }
+        auto r = eng->transcribe_window_with_state(
             m_states[workerId], m_nThreadsPerWorker, m_workerLang[workerId],
             job.pcm.data(), (int)job.pcm.size(), &m_stopping);
         const size_t segs  = r.segments.size();
@@ -729,6 +822,13 @@ TranscriptionScheduler::PipelineStats TranscriptionScheduler::stats() const {
         s.pending   = (int)m_pending.size();
     }
     return s;
+}
+
+bool TranscriptionScheduler::pipeline_running() const {
+    // True iff the windower thread has been launched (and not yet joined).
+    // A default thread id means not-running.  Used by tests + status.
+    std::lock_guard<std::mutex> lk(m_launchMutex);
+    return m_windowerThread.get_id() != std::thread::id();
 }
 
 SchedulerStatus TranscriptionScheduler::query_status() const {
