@@ -43,6 +43,9 @@ add_custom_command(TARGET whisper_xpu_app POST_BUILD
         $<TARGET_FILE_DIR:whisper_xpu_app>
     COMMENT "Copying whisper_xpu_sycl_core.dll to app output directory"
 )
+# ggml/whisper/ggml-sycl now ship as SHARED DLLs (see top-level CMakeLists.txt);
+# co-locate them beside the app exe so it loads at runtime.
+whisper_xpu_copy_shared_libs(whisper_xpu_app)
 
 # ── Copy Intel oneAPI runtime DLLs ──
 # These are needed by whisper_xpu_sycl_core.dll at runtime.
@@ -52,7 +55,7 @@ add_custom_command(TARGET whisper_xpu_app POST_BUILD
 # and must be present on the target system for GPU functionality.
 if(WIN32 AND SYCL_LIBRARY_DIR)
     get_filename_component(_sycl_bin "${SYCL_LIBRARY_DIR}/../bin" ABSOLUTE)
-    set(_rt_dlls sycl9.dll svml_dispmd.dll libmmd.dll libiomp5md.dll
+    set(_rt_dlls sycl7.dll sycl8.dll sycl9.dll svml_dispmd.dll libmmd.dll libiomp5md.dll
         ur_win_proxy_loader.dll ur_loader.dll
         ur_adapter_level_zero.dll ur_adapter_opencl.dll
         umf.dll tcm.dll

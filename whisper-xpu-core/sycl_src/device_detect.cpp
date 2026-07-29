@@ -50,6 +50,41 @@ static DeviceClass classify_by_name(const std::string& name) {
     // Unknown Intel GPU — assume discrete (safer default for large-VRAM parts).
     return DeviceClass::GPU_Discrete;
 }
+
+// SEH crash-guard for the ggml SYCL calls is kept in a SEPARATE function that
+// holds no C++ object with a destructor.  MSVC rejects __try in functions that
+// require object unwinding (C2712); a function touching only POD is allowed.
+// The ggml SYCL calls reach into the SYCL runtime / Level Zero loader, which
+// can access-violate on a broken driver/oneAPI combo — __except(1) catches the
+// AV and we fall back to CPU-only, matching prior behavior.
+// (icpx tolerated __try alongside C++ objects; the core is now MSVC-compiled,
+//  so this split is mandatory.)
+struct RawSyclDevice {
+    int    index;
+    char   name[256];
+    size_t total_mem;
+    size_t free_mem;
+};
+static int enum_sycl_devices_raw(RawSyclDevice* out, int max_count) {
+    __try {
+        int n = ggml_backend_sycl_get_device_count();
+        if (n > max_count) n = max_count;
+        for (int dev = 0; dev < n; ++dev) {
+            out[dev].index     = dev;
+            out[dev].name[0]   = '\0';
+            out[dev].total_mem = 0;
+            out[dev].free_mem  = 0;
+            ggml_backend_sycl_get_device_description(dev, out[dev].name,
+                                                     sizeof(out[dev].name));
+            ggml_backend_sycl_get_device_memory(dev, &out[dev].free_mem,
+                                                &out[dev].total_mem);
+        }
+        return n;
+    } __except(1) {
+        // SYCL runtime / Level Zero crashed — report no GPUs.
+        return 0;
+    }
+}
 #endif
 
 // ---------------------------------------------------------------------------
@@ -65,30 +100,21 @@ WHISPER_XPU_SYCL_API std::vector<DeviceInfo> get_available_devices() {
     list.push_back(cpu);
 
 #ifdef WHISPER_XPU_HAS_SYCL
-    // SEH guard: the ggml SYCL calls reach into sycl8.dll / the Level Zero
-    // loader, which can AV on broken driver/oneAPI combos.  icpx supports
-    // __try with C++ objects (MSVC C2712 doesn't).  __except(1) catches only
-    // the AV — on crash we return CPU-only, matching prior behavior.
-    __try {
-        int n = ggml_backend_sycl_get_device_count();
-        for (int dev = 0; dev < n; ++dev) {
-            char desc[256] = {0};
-            ggml_backend_sycl_get_device_description(dev, desc, sizeof(desc));
-            size_t free_mem = 0, total_mem = 0;
-            ggml_backend_sycl_get_device_memory(dev, &free_mem, &total_mem);
-
-            DeviceInfo inf;
-            inf.index         = dev;
-            inf.device_class  = classify_by_name(desc);
-            inf.name          = desc;
-            inf.vendor        = "Intel";  // ggml SYCL backend targets Intel
-            inf.compute_units = 0;        // not exposed by the ggml API
-            inf.total_mem     = total_mem;
-            inf.free_mem      = free_mem;
-            list.push_back(inf);
-        }
-    } __except(1) {
-        // sycl8.dll / Level Zero crashed — return CPU-only.
+    // Enumerate GPUs via the SEH-guarded POD helper (see above), then promote
+    // the raw results to DeviceInfo.  classify_by_name() builds std::strings,
+    // so it stays out of the __try function.
+    RawSyclDevice raw[32];
+    int n = enum_sycl_devices_raw(raw, 32);
+    for (int dev = 0; dev < n; ++dev) {
+        DeviceInfo inf;
+        inf.index         = raw[dev].index;
+        inf.device_class  = classify_by_name(raw[dev].name);
+        inf.name          = raw[dev].name;
+        inf.vendor        = "Intel";  // ggml SYCL backend targets Intel
+        inf.compute_units = 0;        // not exposed by the ggml API
+        inf.total_mem     = raw[dev].total_mem;
+        inf.free_mem      = raw[dev].free_mem;
+        list.push_back(inf);
     }
 #endif
     return list;
