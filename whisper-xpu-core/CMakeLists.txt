@@ -21,6 +21,7 @@ add_library(whisper_xpu_sycl_core SHARED
     sycl_src/device_detect.cpp
     engine.cpp
     merge_segments.cpp
+    zh_t2s.cpp
 )
 
 target_compile_definitions(whisper_xpu_sycl_core PRIVATE

@@ -65,6 +65,12 @@ private:
     // ── Helpers ──
     void UpdateStatusBar();
     bool LoadEngine(const std::string& path);
+    // Disable the Record button + show a busy/loading state in the status bar
+    // while the engine is being (re)loaded (Engine ctor + GPU warmup can take
+    // ~14s on first-kernel JIT).  Keeps the user from starting a recording
+    // into a half-loaded engine, and signals "not ready" instead of a frozen
+    // window.  Record stays disabled until the engine is ready.
+    void SetLoading(bool loading);
     // One-time SYCL/GPU warmup: runs a tiny throwaway whisper_full on the main
     // thread so the Level Zero runtime resolves the decode kernels BEFORE the
     // scheduler's 4 worker threads issue their first GPU compute.  Without it,
@@ -80,6 +86,7 @@ private:
     std::unique_ptr<TranscriptionScheduler> m_scheduler;
     std::atomic<bool> m_recording{false};
     std::atomic<bool> m_gpuWarmed{false};
+    std::atomic<bool> m_loading{false};   // engine (re)loading + warmup in progress
 
     wxDECLARE_EVENT_TABLE();
 };

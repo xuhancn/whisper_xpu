@@ -3,6 +3,7 @@
 #include "device_detect.h"
 #include "audio_capture.h"
 #include "src/transcription_scheduler.h"
+#include "zh_converter.h"
 
 #include <wx/filedlg.h>
 #include <wx/msgdlg.h>
@@ -148,6 +149,11 @@ void AppFrame::CreateControls() {
     m_recordBtn->Bind(wxEVT_BUTTON, &AppFrame::OnToggleRecord, this);
     m_copyBtn->Bind(wxEVT_BUTTON, &AppFrame::OnCopy, this);
     GetStatusBar()->Bind(wxEVT_LEFT_DOWN, &AppFrame::OnStatusBarClick, this);
+
+    // Record starts DISABLED — enabled by LoadEngine/SetLoading(false) once a
+    // model is loaded + GPU is primed.  Prevents clicking Record before the
+    // engine is ready (the ctor's LoadEngine runs immediately after this).
+    m_recordBtn->Disable();
 }
 
 void AppFrame::CreateStatusBarFields() {
@@ -216,7 +222,9 @@ void AppFrame::UpdateStatusBar() {
     wxString modelLabel = "No model";
     if (!m_modelPath.empty()) {
         modelLabel = wxFileName(m_modelPath).GetFullName();
-        if (m_engine) {
+        if (m_loading.load()) {
+            modelLabel += " [loading…]";
+        } else if (m_engine) {
             modelLabel += m_engine->is_gpu_enabled()
                 ? " [GPU]"
                 : " [CPU]";
@@ -231,20 +239,54 @@ bool AppFrame::LoadEngine(const std::string& path) {
         m_recording = false;
         m_recordBtn->SetLabel("Record");
     }
-    m_engine.reset(safe_create_engine(path, m_deviceIndex));
-    if (!m_engine) {
-        wxMessageBox("Failed to initialize engine: SYCL runtime error.\n"
-                     "Make sure the Intel GPU driver and oneAPI runtime are installed.",
-                     "Error", wxOK | wxICON_ERROR);
-        return false;
-    }
-    m_modelPath = path;
-    // The engine (re)loaded, so any prior GPU warmup is invalidated — the
-    // next Record will re-prime via WarmupGpu().
-    m_gpuWarmed = false;
-    WarmupGpu();
+
+    // Loading an engine + priming the GPU can take ~14s (first-kernel JIT).
+    // Disable Record for the whole load so the user can't start a recording
+    // into a half-loaded engine, and reflect "not ready" in the status bar.
+    // The busy cursor + window-disabler keep the (still GUI-thread, see
+    // WarmupGpu comment) blocking load from looking like a frozen hang —
+    // wxYield-via-wxWindowDisabler repaints the window while we block.
+    SetLoading(true);
+    m_modelPath = path;            // show the filename immediately
     UpdateStatusBar();
-    return true;
+
+    bool ok = false;
+    {
+        // Re-enable on scope exit (success or failure), unless we're mid-load
+        // of a SECOND path — handled by the outer SetLoading(false).
+        wxBusyCursor busy;
+        m_engine.reset(safe_create_engine(path, m_deviceIndex));
+        if (!m_engine) {
+            wxMessageBox("Failed to initialize engine: SYCL runtime error.\n"
+                         "Make sure the Intel GPU driver and oneAPI runtime are installed.",
+                         "Error", wxOK | wxICON_ERROR);
+        } else {
+            ok = true;
+        }
+    }
+
+    if (ok) {
+        // The engine (re)loaded, so any prior GPU warmup is invalidated —
+        // re-prime now (still on the GUI thread — required by WarmupGpu).
+        m_gpuWarmed = false;
+        SetStatusText("Loading… (GPU warmup)", STATUS_MODEL);
+        WarmupGpu();
+    }
+    SetLoading(false);
+    UpdateStatusBar();
+    return ok;
+}
+
+void AppFrame::SetLoading(bool loading) {
+    m_loading.store(loading);
+    // Record must be unclickable while the engine isn't ready.
+    m_recordBtn->Enable(!loading);
+    if (loading) {
+        SetStatusText("Loading…", STATUS_MODEL);
+        // Process pending paints so the disabled state + status text render
+        // before the (blocking) Engine ctor / warmup runs on this thread.
+        wxYield();
+    }
 }
 
 // ──────────────────────────────────────────
@@ -357,6 +399,18 @@ void AppFrame::ShowSettingsDialog() {
     modelBox->Add(browseBtn, 0, wxALL, 4);
     root->Add(modelBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
 
+    // ── Chinese display (glyph form for transcribed Chinese) ──
+    // whisper lets the model pick Trad/Simp glyphs per utterance; this rewrites
+    // transcript text to the chosen form before display.  Auto = untouched.
+    auto* zhBox = new wxStaticBoxSizer(wxHORIZONTAL, &dlg, "Chinese display");
+    auto* zhChoice = new wxChoice(zhBox->GetStaticBox(), wxID_ANY);
+    zhChoice->Append("Auto (model output)");
+    zhChoice->Append("Simplified");
+    zhChoice->Append("Traditional");
+    zhChoice->SetSelection(static_cast<int>(zh_converter().mode()));
+    zhBox->Add(zhChoice, 1, wxEXPAND | wxALL, 4);
+    root->Add(zhBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
+
     // ── Record Hotkey ──
     auto* hotkeyBox = new wxStaticBoxSizer(wxHORIZONTAL, &dlg, "Record Hotkey");
     auto* hotkeyText = new wxTextCtrl(hotkeyBox->GetStaticBox(), wxID_ANY, m_hotkeyStr,
@@ -426,6 +480,7 @@ void AppFrame::ShowSettingsDialog() {
 
         std::string newModelPath = modelText->GetValue().ToStdString();
         wxString newHotkey       = hotkeyText->GetValue();
+        int zhSel = zhChoice->GetSelection();   // -1 if none
 
         bool devChanged   = (newDevIdx != m_deviceIndex);
         bool modelChanged = (newModelPath != m_modelPath);
@@ -434,6 +489,10 @@ void AppFrame::ShowSettingsDialog() {
         m_deviceIndex = newDevIdx;
         m_modelPath   = newModelPath;
         m_hotkeyStr   = newHotkey;
+        // Apply the Chinese-display mode immediately (takes effect on the next
+        // emitted chunk; not persisted — default Auto each launch).
+        if (zhSel >= 0 && zhSel <= 2)
+            zh_converter().set_mode(static_cast<ZhConverter::Mode>(zhSel));
 
         UpdateStatusBar();
 
@@ -466,6 +525,13 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
             auto on_text = [this](const std::string& text) {
                 // Called from the merger thread → marshal to the UI thread.
                 //
+                // Apply the Chinese-display converter (Simplified/Traditional/
+                // Auto) BEFORE rendering.  whisper emits UTF-8 and lets the
+                // model pick the glyph set; the converter rewrites to the
+                // user's chosen form.  It's a no-op for Auto and for non-CJK
+                // text, so English passes through untouched.
+                std::string shown = zh_converter().convert(text);
+                //
                 // FromUTF8 (NOT wxString(text)): whisper emits UTF-8; on MSW
                 // wxString(std::string) converts via the system locale (GBK),
                 // mangling Chinese into mojibake.  FromUTF8 builds the wxString
@@ -477,8 +543,8 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
                 // control unreplainted (mic test: 312 chars emitted, UI empty).
                 // Update() forces an immediate synchronous repaint so each
                 // chunk appears right away.
-                m_transcriptText->CallAfter([this, text]() {
-                    m_transcriptText->AppendText(wxString::FromUTF8(text) + wxT("\n"));
+                m_transcriptText->CallAfter([this, shown]() {
+                    m_transcriptText->AppendText(wxString::FromUTF8(shown) + wxT("\n"));
                     m_transcriptText->Update();
                 });
             };
