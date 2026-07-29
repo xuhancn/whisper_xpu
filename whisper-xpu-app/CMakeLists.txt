@@ -48,18 +48,34 @@ add_custom_command(TARGET whisper_xpu_app POST_BUILD
 whisper_xpu_copy_shared_libs(whisper_xpu_app)
 
 # ── Copy Intel oneAPI runtime DLLs ──
-# These are needed by whisper_xpu_sycl_core.dll at runtime.
+# These are needed by whisper_xpu_sycl_core.dll + ggml-sycl.dll at runtime.
 # oneAPI 2026.1: sycl8.dll → sycl9.dll; tcm.dll moved to tcm/latest/bin.
 # Every copy is EXISTS-guarded so a relocated DLL never fails the build.
-# ze_loader.dll is NOT copied — it's part of the Intel GPU driver
-# and must be present on the target system for GPU functionality.
+# ze_loader.dll is NOT copied — it's part of the Intel GPU driver (lives in
+# System32) and must be present on the target system for GPU functionality.
+# mkl_sycl_blas.5.dll + its MKL deps ARE copied: ggml-sycl.dll imports
+# oneMKL SYCL BLAS (gemm/trsm) for its GEMM path; without these the app fails
+# to load ggml-sycl.dll ("missing mkl_sycl_blas.5.dll") when launched without
+# oneapi-vars on PATH (double-click / no env).  Found in <oneapi>/mkl/latest/bin
+# (2025.3) — SYCL_LIBRARY_DIR is under compiler/, so the MKL bin is a sibling.
 if(WIN32 AND SYCL_LIBRARY_DIR)
+    # SYCL_LIBRARY_DIR = <oneapi>/<ver>/lib, so ../bin = <oneapi>/<ver>/bin,
+    # which holds BOTH the SYCL runtime DLLs and the oneMKL runtime DLLs (they
+    # are co-located in a oneAPI install).
     get_filename_component(_sycl_bin "${SYCL_LIBRARY_DIR}/../bin" ABSOLUTE)
     set(_rt_dlls sycl7.dll sycl8.dll sycl9.dll svml_dispmd.dll libmmd.dll libiomp5md.dll
         ur_win_proxy_loader.dll ur_loader.dll
         ur_adapter_level_zero.dll ur_adapter_opencl.dll
         umf.dll tcm.dll
-        ur_adapter_level_zero_v2.dll libhwloc-15.dll sycl-jit.dll)
+        ur_adapter_level_zero_v2.dll libhwloc-15.dll sycl-jit.dll
+        # oneMKL SYCL runtime + its CPU-side deps: ggml-sycl.dll imports
+        # mkl_sycl_blas.5.dll (oneMKL SYCL BLAS — gemm/trsm), which in turn
+        # needs mkl_core/mkl_intel_thread.  Without these the app fails to load
+        # ggml-sycl.dll ("missing mkl_sycl_blas.5.dll") when launched without
+        # oneapi-vars on PATH (double-click / no env).
+        mkl_sycl_blas.5.dll mkl_sycl_lapack.5.dll mkl_sycl_rng.5.dll
+        mkl_core.2.dll mkl_intel_thread.2.dll mkl_def.2.dll mkl_avx2.2.dll
+        mkl_avx512.2.dll mkl_vml_def.2.dll mkl_vml_avx2.2.dll)
     foreach(_dll ${_rt_dlls})
         if(EXISTS "${_sycl_bin}/${_dll}")
             add_custom_command(TARGET whisper_xpu_app POST_BUILD

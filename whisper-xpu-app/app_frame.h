@@ -65,11 +65,21 @@ private:
     // ── Helpers ──
     void UpdateStatusBar();
     bool LoadEngine(const std::string& path);
+    // One-time SYCL/GPU warmup: runs a tiny throwaway whisper_full on the main
+    // thread so the Level Zero runtime resolves the decode kernels BEFORE the
+    // scheduler's 4 worker threads issue their first GPU compute.  Without it,
+    // the workers' first concurrent GPU decode fails ("whisper_full_with_state:
+    // failed to decode") and the app AVs in sycl8.dll (0xc0000005).  Verified
+    // via tests/streaming_pipeline/test_app_seq{,_warm}.cpp: no-warmup → 0 chars
+    // + 84s hang/AV; warmup → real text, ~206ms/window.  test_pipeline passes
+    // only because it calls transcribe_file() before start_no_capture().
+    void WarmupGpu();
 
     // ── Engine / audio ──
     std::unique_ptr<whisper_xpu::Engine> m_engine;
     std::unique_ptr<TranscriptionScheduler> m_scheduler;
     std::atomic<bool> m_recording{false};
+    std::atomic<bool> m_gpuWarmed{false};
 
     wxDECLARE_EVENT_TABLE();
 };

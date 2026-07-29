@@ -239,8 +239,47 @@ bool AppFrame::LoadEngine(const std::string& path) {
         return false;
     }
     m_modelPath = path;
+    // The engine (re)loaded, so any prior GPU warmup is invalidated — the
+    // next Record will re-prime via WarmupGpu().
+    m_gpuWarmed = false;
+    WarmupGpu();
     UpdateStatusBar();
     return true;
+}
+
+// ──────────────────────────────────────────
+// GPU warmup
+// ──────────────────────────────────────────
+
+void AppFrame::WarmupGpu() {
+    // SEH-style guard: a warmup failure must NEVER crash the app on startup.
+    if (!m_engine) return;
+    if (m_gpuWarmed.load()) return;
+    // Only GPU engines need priming — CPU is unaffected.
+    if (!m_engine->is_gpu_enabled()) {
+        m_gpuWarmed = true;
+        return;
+    }
+
+    // Feed ~1s of silence through transcribe_chunk: a real whisper_full pass
+    // (encoder + decoder) on the engine's shared context, run on THIS (main)
+    // thread.  The transcript is discarded; the point is to force the SYCL
+    // Level Zero runtime to resolve/register the compute kernels once, so the
+    // scheduler's worker threads (which share this context) don't hit a
+    // "failed to decode" / sycl8.dll AV on their first concurrent GPU op.
+    constexpr int kWarmupMs = 1000;          // 1s @ 16 kHz
+    constexpr int kWarmupN  = kWarmupMs * 16;
+    std::vector<float> silence(kWarmupN, 0.0f);
+    wxLogMessage("[warmup] priming GPU with 1s silence before first Record...");
+    try {
+        m_engine->transcribe_chunk(silence.data(), (int)silence.size());
+    } catch (const std::exception& e) {
+        // Non-fatal: the real Record will surface any genuine failure too.
+        wxLogMessage("[warmup] priming failed (non-fatal): %s", e.what());
+        return;   // leave m_gpuWarmed false so Record can retry
+    }
+    m_gpuWarmed = true;
+    wxLogMessage("[warmup] GPU primed OK");
 }
 
 // ──────────────────────────────────────────
@@ -418,6 +457,11 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
                              "No Model", wxOK | wxICON_INFORMATION);
                 return;
             }
+
+            // Defensive: ensure the GPU is primed even if LoadEngine's warmup
+            // was skipped (e.g. device changed in Settings without a reload, or
+            // the earlier warmup threw).  No-op if already warm.
+            WarmupGpu();
 
             auto on_text = [this](const std::string& text) {
                 // Called from the merger thread → marshal to the UI thread.
