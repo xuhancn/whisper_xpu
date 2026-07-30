@@ -164,7 +164,10 @@ void AppFrame::RefreshUI(const SchedulerStatus& s) {
             m_recordBtn->Enable(false);
             break;
         case SchedulerState::Loading:
-            SetStatusText("Loading model…", STATUS_MIC);
+            // Source is compiled /utf-8 so "…" is UTF-8 bytes; the system
+            // locale (GBK 936) would mis-decode the ellipsis → garbled
+            // "[loading***".  wxString::FromUTF8 decodes the bytes as UTF-8.
+            SetStatusText(wxString::FromUTF8("Loading model…"), STATUS_MIC);
             m_recordBtn->SetLabel("Record");
             // Record stays enabled: pressing it during load starts capture
             // immediately; the pipeline launches when warmup finishes.
@@ -176,7 +179,7 @@ void AppFrame::RefreshUI(const SchedulerStatus& s) {
             m_recordBtn->Enable(true);
             break;
         case SchedulerState::Recording:
-            SetStatusText("Recording…", STATUS_MIC);
+            SetStatusText(wxString::FromUTF8("Recording…"), STATUS_MIC);
             m_recordBtn->SetLabel("Stop");
             m_recordBtn->Enable(true);
             m_recording.store(true);
@@ -288,22 +291,28 @@ void AppFrame::CreateStatusBarFields() {
 // ──────────────────────────────────────────
 
 void AppFrame::UpdateStatusBar() {
+    // All rendered strings are UTF-8 bytes (source compiled /utf-8; device/
+    // mic/model names are UTF-8).  wxString(const char*) would decode them
+    // using the system locale (GBK 936 on Chinese Windows) and garble any
+    // non-ASCII (e.g. the "…" ellipsis, or a localized device/mic name).  Use
+    // wxString::FromUTF8 so the bytes are decoded as UTF-8 regardless of the
+    // system code page.
     // Mic field — show actual device name, append (Default) if system default
     wxString micLabel = wxT("Mic: N/A");
     if (m_micIndex == kMicDefault) {
         for (const auto& m : m_micList) {
             if (m.is_default) {
-                micLabel = wxT("Mic: ") + wxString(m.name) + wxT(" (Default)");
+                micLabel = wxT("Mic: ") + wxString::FromUTF8(m.name) + wxT(" (Default)");
                 break;
             }
         }
         if (micLabel == wxT("Mic: N/A") && !m_micList.empty()) {
-            micLabel = wxT("Mic: ") + wxString(m_micList[0].name);
+            micLabel = wxT("Mic: ") + wxString::FromUTF8(m_micList[0].name);
         }
     } else {
         for (const auto& m : m_micList) {
             if (m.index == m_micIndex) {
-                micLabel = wxT("Mic: ") + wxString(m.name);
+                micLabel = wxT("Mic: ") + wxString::FromUTF8(m.name);
                 break;
             }
         }
@@ -317,7 +326,7 @@ void AppFrame::UpdateStatusBar() {
     } else if (m_deviceIndex >= 0) {
         for (const auto& d : m_deviceList) {
             if (d.index == m_deviceIndex) {
-                devLabel = wxT("Device: ") + wxString(d.to_string());
+                devLabel = wxT("Device: ") + wxString::FromUTF8(d.to_string());
                 break;
             }
         }
@@ -325,7 +334,7 @@ void AppFrame::UpdateStatusBar() {
         // Auto-select: show first GPU if available
         for (const auto& d : m_deviceList) {
             if (d.index >= 0) {
-                devLabel = wxT("Device: ") + wxString(d.to_string()) + wxT(" [Auto]");
+                devLabel = wxT("Device: ") + wxString::FromUTF8(d.to_string()) + wxT(" [Auto]");
                 break;
             }
         }
@@ -340,9 +349,9 @@ void AppFrame::UpdateStatusBar() {
     SchedulerStatus s = m_scheduler ? m_scheduler->query_status() : SchedulerStatus{};
     wxString modelLabel = "No model";
     if (!s.model_name.empty()) {
-        modelLabel = s.model_name;
+        modelLabel = wxString::FromUTF8(s.model_name);
         switch (s.state) {
-            case SchedulerState::Loading: modelLabel += " [loading…]"; break;
+            case SchedulerState::Loading: modelLabel += wxString::FromUTF8(" [loading…]"); break;
             case SchedulerState::Ready:
             case SchedulerState::Recording:
                 modelLabel += s.device_desc.find("CPU") == std::string::npos
