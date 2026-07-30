@@ -103,9 +103,7 @@ model=models/ggml-large-v3-turbo-q5_0.bin
 > **The GPU must be warmed up before any worker touches it.** SYCL's
 > first-kernel JIT + per-state buffer alloc runs on the **load thread**
 > (`warmup_states`) before the worker issues its first GPU compute, or the app
-> AVs. On the GPU there is now only 1 worker (the shared-queue crash forced
-> `POOL_SIZE=1`), so transcription is serial; the CPU path still uses 4
-> workers in parallel.
+> AVs.
 
 ## Build from source (verified)
 
