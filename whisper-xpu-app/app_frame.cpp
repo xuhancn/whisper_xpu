@@ -543,13 +543,43 @@ void AppFrame::ShowSettingsDialog() {
         UpdateStatusBar();
 
         // Immediate reload (never blocks the GUI): the scheduler stops any
-        // recording, aborts+joins the old load thread, drops the old engine,
-        // and starts a fresh background load.  The sync thread observes
+        // recording, joins the (already-finished) load thread, drops the old
+        // engine, and starts a fresh background load.  The sync thread observes
         // Loading → Ready/Failed and RefreshUI flips the status bar.
-        if ((devChanged || modelChanged) && !m_modelPath.empty()) {
+        //
+        // CRASH GUARD: never reload while a load is in progress.  Aborting GPU
+        // warmup mid-pass AVs in ggml-sycl (locks can't prevent it — the SYCL
+        // JIT/backend-init is an opaque call that ignores abort flags).  The UI
+        // blocks the danger instead: can_reload() == false ⇒ the model/device
+        // change is kept in Settings (already persisted above) but the reload is
+        // refused until the in-flight load finishes; the user re-opens Settings
+        // and hits OK again to apply it.  This keeps the scheduler simple — no
+        // abort flag, no generation counter, no discard-and-restart command
+        // buffer — because the load thread is NEVER interrupted.
+        if (m_scheduler && (devChanged || modelChanged) && !m_modelPath.empty()) {
+            if (!m_scheduler->can_reload()) {
+                wxMessageBox(
+                    "The model is still loading — please wait for it to finish "
+                    "(the status bar shows Loading), then reopen Settings and "
+                    "press OK to apply this change.\n\n"
+                    "Switching models mid-load is blocked because interrupting "
+                    "GPU warmup can crash the app.",
+                    "Model Still Loading",
+                    wxOK | wxICON_INFORMATION);
+                return;  // keep the change in Settings; reload refused (safe)
+            }
             m_scheduler->reload(m_modelPath, m_deviceIndex);
         } else if (m_modelPath.empty() && m_scheduler) {
             // Switched to no model — reload to an empty path drops the engine.
+            // Still gate on can_reload() so we never interrupt an in-flight load.
+            if (!m_scheduler->can_reload()) {
+                wxMessageBox(
+                    "The model is still loading — please wait for it to finish, "
+                    "then reopen Settings to clear the model.",
+                    "Model Still Loading",
+                    wxOK | wxICON_INFORMATION);
+                return;
+            }
             m_scheduler->reload(m_modelPath, m_deviceIndex);
         }
     }

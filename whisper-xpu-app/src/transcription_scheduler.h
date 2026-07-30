@@ -77,10 +77,21 @@ struct SchedulerStatus {
 //   stop()        — m_stopping aborts in-flight transcribe_window_with_state,
 //                  joins the pipeline threads, frees the 4 states.  The owned
 //                  Engine survives stop() (one model copy per session).
-//   reload(m,d)   — stop() if recording, abort+join the load thread, drop the
-//                  old Engine + states, then async_setup() with the new model/
-//                  device.  Immediate; UI stays responsive (same as startup).
-//   dtor          — abort+join the load thread + pipeline threads, free engine.
+//   reload(m,d)   — stop() if recording, join the prior load thread (it has
+//                  already finished — the UI blocks reload during Loading via
+//                  can_reload()), drop the old Engine + states, then start a
+//                  fresh load_loop.  The UI's sync thread observes Loading →
+//                  Ready/Failed.  Never blocks (the join is instant because
+//                  can_reload() guaranteed idle when the UI called this).
+//   dtor          — join the load thread + pipeline threads, free engine.
+//
+// CRASH-PREVENTION MODEL: the UI (Settings OK handler) refuses to reload
+// while a load is in progress (can_reload() == false ⇒ "still loading"
+// messagebox).  This means reload() is NEVER called mid-warmup, so the load
+// thread is never aborted/interrupted — GPU warmup runs to completion every
+// time.  The scheduler thus needs NO abort flag, NO generation counter, NO
+// discard-and-restart command buffer: the UI blocks the danger, the
+// scheduler stays simple.
 //
 //   AudioCapture (PortAudio thread) → RingBuffer<float> (20s @ 16kHz)
 //   Windower  → 6s windows (1s overlap tail + 5s new), one every 5s
@@ -151,9 +162,11 @@ public:
     // empty.  Safe to call again after reload() tears the old setup down.
     bool async_setup(const std::string& model_path, int device_index);
 
-    // Immediate reload: stop any recording, abort+join the load thread, drop
-    // the old Engine + states, then async_setup() with the new model/device.
-    // The UI's sync thread observes Loading → Ready/Failed.  Never blocks.
+    // Immediate reload: stop any recording, join the (already-finished) load
+    // thread, drop the old Engine + states, then start a fresh load_loop with
+    // the new model/device.  The UI's sync thread observes Loading → Ready/
+    // Failed.  Never blocks (the join is instant — the UI gates this on
+    // can_reload(), so reload is never called mid-warmup).
     void reload(const std::string& model_path, int device_index);
 
     // Open PortAudio (fast, model-independent) + set m_captureActive.  Launches
@@ -176,6 +189,12 @@ public:
 
     bool is_recording() const { return m_recording.load(); }
     bool is_ready() const { return m_engineReady.load(); }
+    // True iff the engine is ready AND no load is in progress — the UI gates
+    // reload() on this so the load thread is never interrupted mid-warmup.
+    // (m_engineReady covers the engine-built case; m_isLoading covers the
+    // narrow window where warmup finished but reload hasn't reset it yet, and
+    // vice-versa.)  The Settings OK handler blocks reload unless this is true.
+    bool can_reload() const { return m_engineReady.load() && !m_isLoading.load(); }
     // Snapshot of state + model/device names + gpu_ready/recording/total_chars.
     SchedulerStatus query_status() const;
 
@@ -217,8 +236,9 @@ private:
     // no real audio is queued.  Uses a THROWAWAY local `lang` (NOT
     // m_workerLang[i]) so whisper's silence language-detect default (typically
     // "en") is never cached — the real first window still auto-detects on real
-    // speech.  `abort_flag` lets reload() interrupt the warmup mid-pass.
-    void warmup_states(const std::atomic<bool>* abort_flag);
+    // speech.  No abort flag — warmup always runs to completion (the UI blocks
+    // reload during Loading, so it's never interrupted).
+    void warmup_states();
 
     // Launch the windower/worker/merger threads once BOTH the engine is ready
     // AND capture is active (or, for start_no_capture, the engine is set).
@@ -280,13 +300,13 @@ private:
     std::vector<std::thread>    m_workerThreads;
     std::thread                 m_mergerThread;
 
-    // Background model-load thread (owner path only).  Aborted by reload()/dtor
-    // if still running.  m_loadGeneration lets a stale load_loop detect that a
-    // newer reload started and exit early instead of racing the new setup.
+    // Background model-load thread (owner path only).  Joined by reload()
+    // (after the UI confirmed idle via can_reload()) and by the dtor.  NEVER
+    // aborted/interrupted — the UI blocks reload during Loading, so warmup
+    // always runs to completion (no abort flag, no generation counter).
     std::thread                 m_loadThread;
-    std::atomic<bool>           m_loadAbort{false};
-    std::atomic<unsigned>       m_loadGeneration{0};   // bumped by reload/async_setup
-    std::atomic<bool>           m_loading{false};      // load_loop is running (for query_status)
+    std::atomic<bool>           m_loading{false};      // load_loop is running (for query_status + can_reload)
+    std::atomic<bool>           m_isLoading{false};    // reload/start gate — true while a load is in flight
     std::mutex                  m_launchMutex;          // guards launch_threads_if_ready + the flags below
     std::atomic<bool>           m_engineReady{false};   // warmup done
     std::atomic<bool>           m_captureActive{false}; // PortAudio open
