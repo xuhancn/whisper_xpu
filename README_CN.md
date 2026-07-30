@@ -201,8 +201,9 @@ zip 内含 exe、所有运行时 DLL、`ggml-tiny.bin` + VAD 模型、OpenCC 中
   导致 DLL 没有 GPU 内核，首次计算报 `No kernel named im2col_sycl<half>`。
   修复是打包 SPIR-V image 的 `icx`/Ninja 子构建（`icx-cl` 重链也行）。
 - **GPU 在 worker 触碰前要先预热。** SYCL 的首次内核 JIT + 每 state buffer 分配
-  必须在 **load 线程**（`warmup_states`）上跑，且在 *任何* worker 发起首次 GPU
-  计算之前，否则 app 会 AV。预热串行跑；之后 worker 并行。
+  必须在 **load 线程**（`warmup_states`）上跑，且在 worker 发起首次 GPU
+  计算之前，否则 app 会 AV。预热在 load 线程串行跑完；GPU 上只有 1 个 worker
+  （见下条），所以转写也是串行的 —— 不再有 worker 并行。CPU 路径仍用 4 个 worker 并行。
 - **多 worker 共享 SYCL queue。** Whisper 的 "一个 context + N 个 state" 池跑了 4 个
   worker，每个调 `whisper_full_with_state`。但 `ggml-sycl` 的 `stream()` 返回设备的
   **`default_queue()` 单例**，于是 4 个 worker 并发向 **同一个 `sycl::queue`** 提交

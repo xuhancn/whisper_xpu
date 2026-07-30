@@ -214,7 +214,9 @@ A few non-obvious behaviors and constraints worth knowing before building or run
 - **Prime the GPU before workers touch it.** SYCL's first-kernel JIT +
   per-state buffer alloc must run on the **load thread** (`warmup_states`)
   *before* any worker issues its first GPU compute, or the app AVs. Warmup
-  runs serially; workers run parallel afterward.
+  runs serially on the load thread; on the GPU there's now only 1 worker
+  (see next note), so transcription is also serial — no worker parallelism
+  on GPU. The CPU path still uses 4 workers in parallel.
 - **Multi-worker shared SYCL queue.** Whisper's "one context +
   N states" pool ran 4 workers, each calling `whisper_full_with_state`. But
   `ggml-sycl`'s `stream()` returns the device's **`default_queue()` singleton**,
