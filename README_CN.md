@@ -91,6 +91,11 @@ model=models/ggml-large-v3-turbo-q5_0.bin
 > **在 GPU 上优先用 `q5_0` 而非 `q8_0`。** `q8_0` 模型在 Intel Arc GPU 上有问题
 > （问题在上游 ggml-sycl 的算子）；`q5_0` 在 CPU 和 GPU 上都正常。
 
+> **GPU 在 worker 触碰前要先预热。** SYCL 的首次内核 JIT + 每 state buffer 分配
+> 在 **load 线程**（`warmup_states`）上跑，且在 worker 发起首次 GPU 计算之前，
+> 否则 app 会 AV。GPU 上只有 1 个 worker（共享队列崩溃迫使 `POOL_SIZE=1`），
+> 所以转写是串行的；CPU 路径仍用 4 个 worker 并行。
+
 ---
 
 ## 从源码构建（已验证）
@@ -188,7 +193,7 @@ zip 内含 exe、所有运行时 DLL、`ggml-tiny.bin` + VAD 模型、OpenCC 中
 
 ## Notes（注意事项）
 
-构建或运行前值得了解的一些非显然行为与约束。
+编译前值得了解的一些非显然约束。
 
 - **使用 oneAPI 2025.3。** 2025.3（含 `sycl8.dll`）是 GPU 路径已验证的工具链。
   更新（2026.1，`sycl9.dll`）在本仓库未测试 —— 不代表它坏了，只是这里没验证。
@@ -200,34 +205,6 @@ zip 内含 exe、所有运行时 DLL、`ggml-tiny.bin` + VAD 模型、OpenCC 中
 - **`ggml-sycl.dll` 必须带 SPIR-V device image。** `lld-link` 静默忽略 `-fsycl`，
   导致 DLL 没有 GPU 内核，首次计算报 `No kernel named im2col_sycl<half>`。
   修复是打包 SPIR-V image 的 `icx`/Ninja 子构建（`icx-cl` 重链也行）。
-- **GPU 在 worker 触碰前要先预热。** SYCL 的首次内核 JIT + 每 state buffer 分配
-  必须在 **load 线程**（`warmup_states`）上跑，且在 worker 发起首次 GPU
-  计算之前，否则 app 会 AV。预热在 load 线程串行跑完；GPU 上只有 1 个 worker
-  （见下条），所以转写也是串行的 —— 不再有 worker 并行。CPU 路径仍用 4 个 worker 并行。
-- **多 worker 共享 SYCL queue。** Whisper 的 "一个 context + N 个 state" 池跑了 4 个
-  worker，每个调 `whisper_full_with_state`。但 `ggml-sycl` 的 `stream()` 返回设备的
-  **`default_queue()` 单例**，于是 4 个 worker 并发向 **同一个 `sycl::queue`** 提交
-  `parallel_for`/malloc/free。`sycl::queue` 对此 **非线程安全** → 间歇性 AV
-  （`c0000005`，mul_mat pool dtor 里读 `0xFFFF…FFFF`）或 fast-fail 中止
-  （`c0000409`，在 `ggml_backend_sycl_synchronize`）。这在找到共享队列根因前一度
-  被归因到驱动。**修复：GPU 上 `POOL_SIZE=1`**（单 worker 串行化队列访问，零锁）；
-  CPU 保留 4 个 worker（ggml-cpu 每次调用是线程安全的）。
-- **核显（Intel Iris Xe）。** 其较旧 NEO 驱动拒绝 SYCL build option
-  `-ze-intel-greater-than-4GB-buffer-required`（`urProgramBuildExp` →
-  `UR_RESULT_ERROR_UNSUPPORTED_FEATURE`）→ 加载即崩。驱动更新到 32.0.101.7088+ 后
-  可用；设备下拉框现在会显示它，且一个 SEH 守护的 init 探测会在驱动无法 init
-  SYCL backend 时把它标成 `(driver unavailable)`。
-- **状态栏乱码 `[loading***`。** 源码用 `/utf-8` 编译，所以 `…` 省略号
-  （U+2026）和任何非 ASCII 名字是 UTF-8 字节，但 `wxString(char*)` 按系统 locale
-  （GBK 936）解码 → 乱码。修复：所有渲染字符串走 `wxString::FromUTF8`。
-- **避免给正在跑的进程挂 `cdb`。** 挂调试器会触发一个 *无关的* Intel Level Zero
-  驱动在 debug/tracer 路径上的故障（`zetModuleGetDebugInfo` 读哨兵值），这跟真正的
-  多 worker 崩溃是两回事。要抓崩溃，注册 **WER LocalDumps**
-  （`enable_wer_dump.bat`，HKLM，以管理员运行）→ 不挂调试器、崩溃时自动生成
-  minidump；事后用 `cdb -z <dump>` 离线分析（开启 ggml-sycl `/Zi`+`/DEBUG` +
-  RelWithDebInfo 子构建后即有完整 PDB）。
-- **Whisper `detect_language=true` 意为 detect-and-exit**（0 转写）。要真正转写，
-  用 `language="auto"` 加 `detect_language=false`。
 
 ---
 

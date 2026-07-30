@@ -100,6 +100,13 @@ model=models/ggml-large-v3-turbo-q5_0.bin
 > the Intel Arc GPU (problem is in the upstream ggml-sycl operators); `q5_0`
 > works fine on both CPU and GPU.
 
+> **The GPU must be warmed up before any worker touches it.** SYCL's
+> first-kernel JIT + per-state buffer alloc runs on the **load thread**
+> (`warmup_states`) before the worker issues its first GPU compute, or the app
+> AVs. On the GPU there is now only 1 worker (the shared-queue crash forced
+> `POOL_SIZE=1`), so transcription is serial; the CPU path still uses 4
+> workers in parallel.
+
 ## Build from source (verified)
 
 ### Prerequisites
@@ -197,7 +204,7 @@ Default `OFF` — dev builds skip the packaging cost.
 
 ## Notes (注意事项)
 
-A few non-obvious behaviors and constraints worth knowing before building or running.
+A few non-obvious build constraints worth knowing before compiling.
 
 - **Pin oneAPI 2025.3.** 2025.3 (ships `sycl8.dll`) is the verified toolchain
   for the GPU path. Newer (2026.1, `sycl9.dll`) is not tested in this repo — it
@@ -211,42 +218,6 @@ A few non-obvious behaviors and constraints worth knowing before building or run
   ignored `-fsycl`, so the DLL had no GPU kernels and the first compute
   reported `No kernel named im2col_sycl<half>`. The fix is the `icx`/Ninja
   sub-build that bundles the SPIR-V image (an `icx-cl` relink also works).
-- **Prime the GPU before workers touch it.** SYCL's first-kernel JIT +
-  per-state buffer alloc must run on the **load thread** (`warmup_states`)
-  *before* any worker issues its first GPU compute, or the app AVs. Warmup
-  runs serially on the load thread; on the GPU there's now only 1 worker
-  (see next note), so transcription is also serial — no worker parallelism
-  on GPU. The CPU path still uses 4 workers in parallel.
-- **Multi-worker shared SYCL queue.** Whisper's "one context +
-  N states" pool ran 4 workers, each calling `whisper_full_with_state`. But
-  `ggml-sycl`'s `stream()` returns the device's **`default_queue()` singleton**,
-  so all 4 workers submitted `parallel_for`/malloc/free to the **same
-  `sycl::queue`** concurrently. `sycl::queue` is **not thread-safe** for that →
-  intermittent AV (`c0000005`, read `0xFFFF…FFFF` in a mul_mat pool dtor) or
-  fast-fail abort (`c0000409` at `ggml_backend_sycl_synchronize`). This was
-  initially attributed to the driver before the shared-queue cause was found.
-  **Fix: `POOL_SIZE=1` on GPU**
-  (one worker serializes queue access, zero locks); CPU keeps 4 workers
-  (ggml-cpu is thread-safe per call).
-- **iGPU (Intel Iris Xe).** Its older NEO driver rejected the SYCL build option
-  `-ze-intel-greater-than-4GB-buffer-required` (`urProgramBuildExp` →
-  `UR_RESULT_ERROR_UNSUPPORTED_FEATURE`) → crash on load. It became usable after
-  a driver update (32.0.101.7088+); the device dropdown now shows it and a
-  SEH-guarded init probe marks it `(driver unavailable)` if its driver can't
-  init a SYCL backend.
-- **Status-bar garble `[loading***`.** The source is `/utf-8`, so the `…`
-  ellipsis (U+2026) and any non-ASCII name are UTF-8 bytes, but `wxString(char*)`
-  decoded them with the system locale (GBK 936) → garbage. Fixed by routing
-  all rendered strings through `wxString::FromUTF8`.
-- **Avoid attaching `cdb` to a live run.** A debugger attachment triggers an
-  *unrelated* Intel Level Zero driver fault on its debug/tracer path
-  (`zetModuleGetDebugInfo` reads a sentinel), which is separate from the real
-  multi-worker crash. To capture crashes, register **WER LocalDumps**
-  (`enable_wer_dump.bat`, HKLM, run as admin) → auto-minidump on crash with no
-  debugger attached; analyze offline with `cdb -z <dump>` (full PDBs are built
-  when you enable the ggml-sycl `/Zi`+`/DEBUG` + RelWithDebInfo sub-build).
-- **Whisper `detect_language=true` means detect-and-exit** (0 transcription).
-  Use `language="auto"` with `detect_language=false` for actual transcription.
 
 ## Project structure
 
