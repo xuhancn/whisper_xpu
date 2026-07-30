@@ -1,5 +1,7 @@
 # whisper_xpu
 
+**English** | [中文](README_CN.md)
+
 > ### **Real-time speech-to-text on Intel GPUs, via SYCL (oneAPI) + oneDNN.**
 
 `whisper_xpu` runs OpenAI's Whisper model on Intel Arc / Iris Xe GPUs using
