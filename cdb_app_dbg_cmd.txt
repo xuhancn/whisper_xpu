@@ -1,0 +1,5 @@
+.symfix+ D:\xu_github\whisper_xpu\build-dbg\whisper-xpu-app\RelWithDebInfo
+.reload /f
+sxe -c "kv 60; !analyze -v; q" c0000005
+sxe -c "kv 60; !analyze -v; q" c0000409
+g
