@@ -260,6 +260,15 @@ private:
     // this mutex serializes that.  Locked once per window in the worker hot
     // path (~5s cadence) so the cost is negligible.
     mutable std::mutex                  m_engineMutex;
+    // Serializes the GPU-init phase (Engine ctor + init_states + warmup_states)
+    // across load_loop instances.  ggml_backend_sycl_init is NOT safe to call
+    // concurrently on the same device — two overlapping load_loops (rapid
+    // reload while the first is still in GPU init) corrupt SYCL global state
+    // and AV in ggml-sycl.  A new load_loop blocks here until the prior one
+    // releases, so GPU init is one-at-a-time WITHOUT blocking the GUI thread
+    // (the wait is on the load thread; reload's bounded join returns and the
+    // new load_loop waits its turn).
+    mutable std::mutex                  m_gpuInitMutex;
     std::unique_ptr<whisper_xpu::Engine> m_engine;             // owner path
     whisper_xpu::Engine*                 m_sharedEngine = nullptr;  // test path (borrowed)
     std::vector<whisper_state*>          m_states;          // POOL_SIZE, owned

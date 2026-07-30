@@ -240,6 +240,22 @@ void TranscriptionScheduler::load_loop() {
     sched_log("[Scheduler] load_loop: constructing Engine (model='%s' dev=%d, gen=%u)...",
               m_modelPath.c_str(), m_deviceIndex, gen);
 
+    // ── GPU-init serialization ──
+    // ggml_backend_sycl_init (called inside the Engine ctor) is NOT safe to
+    // run concurrently on the same device — two overlapping load_loops (a
+    // rapid reload while the first load is still in GPU init) corrupt SYCL
+    // global state and AV in ggml-sycl.  Hold m_gpuInitMutex for the whole
+    // GPU-init phase so load_loops are one-at-a-time.  This blocks on the LOAD
+    // thread (not the GUI): reload's bounded join returns, the new load_loop
+    // waits its turn here.  Re-check the generation AFTER acquiring — if a
+    // newer reload superseded us while we were blocked, bail without touching
+    // the GPU (the newer load owns it).
+    std::unique_lock<std::mutex> gpuLock(m_gpuInitMutex);
+    if (m_loadGeneration.load() != gen || m_loadAbort.load()) {
+        sched_log("[Scheduler] load_loop: superseded while waiting for GPU lock — exiting");
+        return;
+    }
+
     // The Engine ctor (model load + ggml alloc) lives inside the icpx-built
     // core DLL, which SEH-guards any SYCL AV.  A try/catch (MSVC caller) turns
     // a hard crash into a logged failure so the app stays alive.  Build into a
@@ -289,6 +305,10 @@ void TranscriptionScheduler::load_loop() {
 
     // Engine + states + JIT are all primed → mark ready and, if Record was
     // already pressed (capture active), launch the pipeline threads now.
+    // Release the GPU-init lock before launching so the next reload can
+    // proceed (the pipeline workers don't need it — the launch gate's
+    // m_engineMutex check keeps them safe).
+    gpuLock.unlock();
     {
         std::lock_guard<std::mutex> lk(m_launchMutex);
         m_engineReady.store(true);
