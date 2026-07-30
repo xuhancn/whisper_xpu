@@ -195,8 +195,9 @@ cmake --build build-gpu --target release_package
 # → build-gpu\whisper_xpu_v1.0.0.zip
 ```
 
-The zip bundles the exe, all runtime DLLs, `ggml-tiny.bin` + the VAD model,
-the OpenCC zh-converter dicts, and a default `whisper_xpu.ini` (tiny + CPU).
+The zip bundles the exe + all runtime DLLs, two small models under `models/`
+(`ggml-tiny.bin` and `vad_model/ggml-vad.bin`), the OpenCC zh-converter dicts
+under `models/opencc/`, and a default `whisper_xpu.ini` (tiny + CPU).
 Default `OFF` — dev builds skip the packaging cost.
 
 ## Notes
