@@ -146,11 +146,11 @@ The zip bundles the exe, all runtime DLLs, `ggml-tiny.bin` + the VAD model,
 the OpenCC zh-converter dicts, and a default `whisper_xpu.ini` (tiny + CPU).
 Default `OFF` — dev builds skip the packaging cost.
 
-## Pitfalls (踩坑记录)
+## Notes (注意事项)
 
-The path here was long. These bit us — recorded so you don't have to re-discover them.
+A few non-obvious behaviors and constraints worth knowing before building or running.
 
-- **oneAPI 2026.1 is broken for the GPU path.** `sycl9.dll` + the Level Zero
+- **oneAPI 2026.1 does not work for the GPU path.** `sycl9.dll` + the Level Zero
   runtime fail to resolve the first compute kernel. **Pin 2025.3** (which ships
   `sycl8.dll`). The root `setvars.bat` loads 2026.1 — use the per-version
   `2025.3\oneapi-vars.bat`.
@@ -166,14 +166,15 @@ The path here was long. These bit us — recorded so you don't have to re-discov
   per-state buffer alloc must run on the **load thread** (`warmup_states`)
   *before* any worker issues its first GPU compute, or the app AVs. Warmup
   runs serially; workers run parallel afterward.
-- **The big one — multi-worker shared SYCL queue.** Whisper's "one context +
+- **Multi-worker shared SYCL queue.** Whisper's "one context +
   N states" pool ran 4 workers, each calling `whisper_full_with_state`. But
   `ggml-sycl`'s `stream()` returns the device's **`default_queue()` singleton**,
   so all 4 workers submitted `parallel_for`/malloc/free to the **same
   `sycl::queue`** concurrently. `sycl::queue` is **not thread-safe** for that →
   intermittent AV (`c0000005`, read `0xFFFF…FFFF` in a mul_mat pool dtor) or
   fast-fail abort (`c0000409` at `ggml_backend_sycl_synchronize`). This was
-  misdiagnosed as a driver bug for a while. **Fix: `POOL_SIZE=1` on GPU**
+  initially attributed to the driver before the shared-queue cause was found.
+  **Fix: `POOL_SIZE=1` on GPU**
   (one worker serializes queue access, zero locks); CPU keeps 4 workers
   (ggml-cpu is thread-safe per call).
 - **iGPU (Intel Iris Xe).** Its older NEO driver rejected the SYCL build option
@@ -186,9 +187,9 @@ The path here was long. These bit us — recorded so you don't have to re-discov
   ellipsis (U+2026) and any non-ASCII name are UTF-8 bytes, but `wxString(char*)`
   decoded them with the system locale (GBK 936) → garbage. Fixed by routing
   all rendered strings through `wxString::FromUTF8`.
-- **Don't attach `cdb` to a live run.** Attaching a debugger trips an
-  *unrelated* Intel Level Zero driver AV on its debug/tracer path
-  (`zetModuleGetDebugInfo` reads a sentinel) that distracted from the real
+- **Avoid attaching `cdb` to a live run.** A debugger attachment triggers an
+  *unrelated* Intel Level Zero driver fault on its debug/tracer path
+  (`zetModuleGetDebugInfo` reads a sentinel), which is separate from the real
   multi-worker crash. To capture crashes, register **WER LocalDumps**
   (`enable_wer_dump.bat`, HKLM, run as admin) → auto-minidump on crash with no
   debugger attached; analyze offline with `cdb -z <dump>` (full PDBs are built
