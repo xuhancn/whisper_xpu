@@ -101,11 +101,8 @@ model=models/ggml-large-v3-turbo-q5_0.bin
 - **Windows 10/11**
 - [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html)
   **2025.3** — provides the SYCL compiler (`icx`/`icpx`) and `sycl8.dll`.
-  Use 2025.3 specifically: the bundled **whisper.cpp / ggml-sycl** is written
-  against the 2025.3 Level Zero + `sycl8` runtime; under oneAPI 2026.1
-  (`sycl9.dll`) the first compute kernel fails to resolve
-  (`No kernel named im2col_sycl<half>`) because ggml-sycl hasn't been ported to
-  the 2026.1 runtime yet — not a bug in oneAPI itself. Pin 2025.3 for now.
+  2025.3 is the **verified** toolchain. Newer (2026.1, `sycl9.dll`) and
+  older versions are not tested in this repo. Pin 2025.3.
 - [Ninja](https://ninja-build.org/) 1.11+ (`winget install Ninja-build.Ninja`)
 - Visual Studio 2022 (Build Tools or IDE) — "Desktop development with C++"
 - CMake 3.22+
@@ -120,8 +117,8 @@ model=models/ggml-large-v3-turbo-q5_0.bin
 ### Configure + build
 
 ```powershell
-# 1. Pin oneAPI 2025.3 (the root setvars.bat loads 2026.1, whose sycl9.dll
-#    ggml-sycl isn't ported to yet — see Notes).
+# 1. Pin oneAPI 2025.3 (the verified toolchain; the root setvars.bat loads
+#    the latest version — see Notes).
 $env:VS2022INSTALLDIR = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
 & "C:\Program Files (x86)\Intel\oneAPI\2025.3\oneapi-vars.bat"
 
@@ -196,12 +193,10 @@ Default `OFF` — dev builds skip the packaging cost.
 
 A few non-obvious behaviors and constraints worth knowing before building or running.
 
-- **Use oneAPI 2025.3, not 2026.1, for the GPU path.** This is a whisper.cpp /
-  ggml-sycl limitation, not an oneAPI bug: ggml-sycl is written against 2025.3's
-  `sycl8.dll` + Level Zero runtime and hasn't been ported to 2026.1's `sycl9.dll`,
-  so the first compute kernel fails to resolve (`No kernel named
-  im2col_sycl<half>`). Pin 2025.3 (which ships `sycl8.dll`). The root
-  `setvars.bat` loads 2026.1 — use the per-version `2025.3\oneapi-vars.bat`.
+- **Pin oneAPI 2025.3.** 2025.3 (ships `sycl8.dll`) is the verified toolchain
+  for the GPU path. Newer (2026.1, `sycl9.dll`) is not tested in this repo — it
+  is not known to be broken, just not validated here. The root `setvars.bat`
+  loads the latest version — use the per-version `2025.3\oneapi-vars.bat` to pin.
 - **Under `-G Ninja`, force `cl` at the top level.** CMake picks `icx` first on
   PATH after oneapi-vars; wxWidgets then aborts with `Unknown WIN32 compiler
   type`. Pass `-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl` — the whisper.cpp
