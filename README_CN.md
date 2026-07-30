@@ -16,7 +16,7 @@ Intel 的 SYCL 运行时，配一个实时流式转写的 wxWidgets 桌面应用
 
 ---
 
-## 这是什么
+## 关于本项目
 
 **现在** —— 一个 Windows 桌面应用，持续采集麦克风音频，切成 5 秒一个窗口，
 每个窗口到达即在 GPU 上转写 —— 文字逐字实时出现，带重叠去重，边界处不丢字、
@@ -101,7 +101,7 @@ model=models/ggml-large-v3-turbo-q5_0.bin
 - [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html)
   **2025.3** —— 提供 SYCL 编译器（`icx`/`icpx`）和 `sycl8.dll`。
   2025.3 是 **已验证** 的工具链。更新（2026.1，`sycl9.dll`）和更旧版本在本仓库
-  未测试。请固定用 2025.3。
+  未测试。请使用 2025.3。
 - [Ninja](https://ninja-build.org/) 1.11+（`winget install Ninja-build.Ninja`）
 - Visual Studio 2022（Build Tools 或 IDE）—— 含 "Desktop development with C++"
 - CMake 3.22+
@@ -115,7 +115,7 @@ model=models/ggml-large-v3-turbo-q5_0.bin
 ### 配置 + 构建
 
 ```powershell
-# 1. 固定 oneAPI 2025.3（已验证工具链；根 setvars.bat 会加载最新版 —— 见 Notes）。
+# 1. 使用 oneAPI 2025.3（已验证工具链；根 setvars.bat 会加载最新版 —— 见 Notes）。
 $env:VS2022INSTALLDIR = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
 & "C:\Program Files (x86)\Intel\oneAPI\2025.3\oneapi-vars.bat"
 
@@ -190,9 +190,9 @@ zip 内含 exe、所有运行时 DLL、`ggml-tiny.bin` + VAD 模型、OpenCC 中
 
 构建或运行前值得了解的一些非显然行为与约束。
 
-- **固定 oneAPI 2025.3。** 2025.3（含 `sycl8.dll`）是 GPU 路径已验证的工具链。
+- **使用 oneAPI 2025.3。** 2025.3（含 `sycl8.dll`）是 GPU 路径已验证的工具链。
   更新（2026.1，`sycl9.dll`）在本仓库未测试 —— 不代表它坏了，只是这里没验证。
-  根 `setvars.bat` 会加载最新版 —— 用按版本的 `2025.3\oneapi-vars.bat` 固定。
+  根 `setvars.bat` 会加载最新版 —— 用按版本的 `2025.3\oneapi-vars.bat` 来使用它。
 - **`-G Ninja` 下顶层强制 `cl`。** source oneapi-vars 后 CMake 会优先选 PATH 上的
   `icx`；wxWidgets 随即因 `Unknown WIN32 compiler type` 中止。传
   `-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl` —— whisper.cpp 和 oneDNN 子构建
