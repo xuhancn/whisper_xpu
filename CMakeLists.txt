@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.22)
-project(whisper_xpu VERSION 0.1.0 LANGUAGES C CXX)
+project(whisper_xpu VERSION 1.0.0 LANGUAGES C CXX)
+
+# Release packaging: cmake -B build-gpu -DWHISPER_XPU_RELEASE=ON, then
+# cmake --build build-gpu --target release_package → whisper_xpu_v1.0.0.zip.
+# OFF by default (dev builds skip the packaging cost).  See whisper-xpu-app.
+option(WHISPER_XPU_RELEASE "Build a drop-and-run release zip" OFF)
+
 
 if(POLICY CMP0194)
     cmake_policy(SET CMP0194 NEW)
