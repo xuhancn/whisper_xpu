@@ -6,6 +6,11 @@
 Intel's SYCL runtime, with a live-streaming wxWidgets desktop app for
 dictation — the foundation for a **voice-driven coding workflow**.
 
+> **Note on older Intel graphics:** Arc (discrete) and Iris Xe (integrated)
+> GPUs work. Older Intel UHD / HD Graphics are **not supported** — they lack
+> the SYCL / Level Zero features the ggml-sycl kernels need. The CPU path
+> works on any machine regardless of GPU.
+
 <!-- TODO: drop the app screenshot here as Images/app.png -->
 ![whisper_xpu](Images/app.png)
 
