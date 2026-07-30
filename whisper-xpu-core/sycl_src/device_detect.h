@@ -20,6 +20,12 @@ struct WHISPER_XPU_SYCL_API DeviceInfo {
     int         compute_units;
     size_t      total_mem;
     size_t      free_mem;
+    // True if a SEH-guarded ggml_backend_sycl_init succeeded on this device
+    // (an init-level probe — catches driver faults at backend setup; a
+    // compute-level regression like the old urProgramBuildExp AV would still
+    // crash at load time and is NOT caught here).  The UI greys out (but does
+    // NOT hide) devices with usable=false so the user sees the device exists.
+    bool        usable = true;
     std::string to_string() const;
 };
 

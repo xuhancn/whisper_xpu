@@ -86,7 +86,7 @@ ExternalProject_Add(whisper_cpp_build
                       -S "${_whisper_src}" -B "${_whisper_bld}"
                       -DCMAKE_C_COMPILER=icx
                       -DCMAKE_CXX_COMPILER=icx
-                      -DCMAKE_BUILD_TYPE=Release
+                      -DCMAKE_BUILD_TYPE=RelWithDebInfo
                       -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY=${_whisper_lib}
                       -DCMAKE_MODULE_PATH=${CMAKE_SOURCE_DIR}/cmake
                       -DONEDNN_STATIC=ON

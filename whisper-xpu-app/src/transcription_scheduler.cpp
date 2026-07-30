@@ -69,7 +69,6 @@ TranscriptionScheduler::TranscriptionScheduler(TextCallback on_text,
     sched_log("[Scheduler] created (owner path; model='%s' dev=%d ring=%zu samples)",
               m_modelPath.c_str(), m_deviceIndex, m_ring.capacity());
     // Kick off the background model load immediately (never blocks the GUI).
-    // async_setup starts the load thread + bumps m_loadGeneration.
     if (!m_modelPath.empty()) {
         async_setup(m_modelPath, m_deviceIndex);
     } else {
@@ -81,22 +80,31 @@ TranscriptionScheduler::TranscriptionScheduler(TextCallback on_text,
 
 TranscriptionScheduler::~TranscriptionScheduler() {
     if (m_recording) stop();
-    // If the background load thread is still running (e.g. the app closed
-    // during the startup load), abort it and join before freeing the engine.
-    // Bump the generation too so a stale load_loop exits its superseded checks.
+    // Join the background load thread if still running (e.g. the app closed
+    // during the startup load).  We do NOT abort it — there's no abort flag
+    // anymore (the UI blocks reload during Loading, so warmup is never
+    // interrupted).  The join blocks until load_loop() finishes naturally.
+    // Closing mid-load therefore waits for the full warmup (~15s on GPU turbo)
+    // rather than crashing; a stuck SYCL JIT would hang here, but that's a
+    // driver fault, not something an abort could fix safely.
     if (m_ownsEngine && m_loadThread.joinable()) {
-        m_loadAbort.store(true);
-        m_loadGeneration.fetch_add(1);
-        m_workerCv.notify_all();
-        m_mergerCv.notify_all();
+        sched_log("[Scheduler] dtor: joining load thread...");
         m_loadThread.join();
+        sched_log("[Scheduler] dtor: load thread joined");
     }
     join_thread(m_windowerThread);
     for (auto& t : m_workerThreads) join_thread(t);
     join_thread(m_mergerThread);
-    // The owned Engine is released here (unique_ptr dtor).  Per-worker states
-    // are freed in stop(); if load_loop() was still mid-init, the abort path
-    // below frees partial states before the engine goes.
+    // Free any per-worker states left by an aborted-mid-init load_loop (it
+    // publishes m_engine + populates m_states before warmup; the dtor must
+    // free them against the owned engine BEFORE the unique_ptr releases it).
+    {
+        std::lock_guard<std::mutex> lk(m_engineMutex);
+        whisper_xpu::Engine* eng = m_engine.get();
+        if (eng) for (whisper_state* st : m_states) eng->free_state(st);
+        m_states.clear();
+        m_workerLang.clear();
+    }
     sched_log("[Scheduler] destroyed");
 }
 
@@ -124,15 +132,19 @@ bool TranscriptionScheduler::init_states() {
         sched_log("[Scheduler] init_states: no engine");
         return false;
     }
+    // POOL_SIZE: GPU=1, CPU=4.  On GPU, all workers would share the SYCL
+    // default_queue (singleton) → concurrent submit is SYCL UB → crash.
+    // One GPU worker serializes GPU access with no lock.  CPU is safe with 4.
+    m_poolSize = eng->is_gpu_enabled() ? POOL_SIZE_GPU : POOL_SIZE_CPU;
     int hw = (int)std::thread::hardware_concurrency();
     if (hw < 1) hw = 4;
-    m_nThreadsPerWorker = std::max(1, hw / POOL_SIZE);
+    m_nThreadsPerWorker = std::max(1, hw / m_poolSize);
 
     m_states.clear();
     m_workerLang.clear();
-    m_states.reserve(POOL_SIZE);
-    m_workerLang.resize(POOL_SIZE);  // empty ⇒ first window auto-detects
-    for (int i = 0; i < POOL_SIZE; ++i) {
+    m_states.reserve(m_poolSize);
+    m_workerLang.resize(m_poolSize);  // empty ⇒ first window auto-detects
+    for (int i = 0; i < m_poolSize; ++i) {
         whisper_state* st = eng->create_state();
         if (!st) {
             sched_log("[Scheduler] state %d create failed — freeing partial", i);
@@ -143,8 +155,9 @@ bool TranscriptionScheduler::init_states() {
         }
         m_states.push_back(st);
     }
-    sched_log("[Scheduler] pool: 1 Engine + %d states × %d threads = %d total (hw=%d)",
-              POOL_SIZE, m_nThreadsPerWorker, POOL_SIZE * m_nThreadsPerWorker, hw);
+    sched_log("[Scheduler] pool: 1 Engine + %d states × %d threads = %d total (hw=%d, %s)",
+              m_poolSize, m_nThreadsPerWorker, m_poolSize * m_nThreadsPerWorker, hw,
+              eng->is_gpu_enabled() ? "GPU" : "CPU");
     return true;
 }
 
@@ -152,7 +165,7 @@ bool TranscriptionScheduler::init_states() {
 // Per-worker state warmup (called before threads start)
 // ────────────────────────────────────────────────────────────
 
-void TranscriptionScheduler::warmup_states(const std::atomic<bool>* abort_flag) {
+void TranscriptionScheduler::warmup_states() {
     // 1s of silence @ 16 kHz — enough to trigger one full encoder+decoder
     // pass through whisper_full_with_state on each worker's own state, priming
     // the SYCL/Level Zero first-kernel JIT compile + per-state compute-buffer
@@ -167,33 +180,28 @@ void TranscriptionScheduler::warmup_states(const std::atomic<bool>* abort_flag) 
     // detection is cheap now because the JIT/encoder cold path was already
     // primed here.
     //
-    // `abort_flag` (=&m_loadAbort from load_loop) lets reload() interrupt the
-    // warmup mid-pass so a stale load doesn't keep burning the GPU after a new
-    // setup has started.
+    // No abort flag — warmup always runs to completion.  The UI blocks reload
+    // during Loading (can_reload()), so this is never interrupted mid-pass.
     constexpr int kWarmupN = 1 * SR;
     std::vector<float> silence(kWarmupN, 0.0f);
 
     whisper_xpu::Engine* eng = engine();
-    for (int i = 0; i < POOL_SIZE; ++i) {
-        if (abort_flag && abort_flag->load()) break;   // reload()/dtor raced in
+    const int n = (int)m_states.size();
+    for (int i = 0; i < n; ++i) {
         if (!m_states[i] || !eng) continue;
         std::string lang;  // throwaway — auto-detects on silence, result
                            // discarded; m_workerLang[i] stays empty.
         auto t0 = std::chrono::high_resolution_clock::now();
         auto r = eng->transcribe_window_with_state(
             m_states[i], m_nThreadsPerWorker, lang,
-            silence.data(), (int)silence.size(), abort_flag);
+            silence.data(), (int)silence.size(), nullptr);
         auto t1 = std::chrono::high_resolution_clock::now();
         const double ms = std::chrono::duration<double,std::milli>(t1-t0).count();
-        if (r.aborted) {
-            sched_log("[Scheduler] warmup state %d ABORTED (%.0fms)", i, ms);
-        } else {
-            sched_log("[Scheduler] warmup state %d OK (%.0fms, %zu segs) — lang left for real audio",
-                      i, ms, r.segments.size());
-        }
+        sched_log("[Scheduler] warmup state %d OK (%.0fms, %zu segs) — lang left for real audio",
+                  i, ms, r.segments.size());
     }
     sched_log("[Scheduler] warmup done — JIT/buffer primed for all %d states",
-              POOL_SIZE);
+              n);
 }
 
 // ────────────────────────────────────────────────────────────
@@ -201,17 +209,19 @@ void TranscriptionScheduler::warmup_states(const std::atomic<bool>* abort_flag) 
 // ────────────────────────────────────────────────────────────
 
 void TranscriptionScheduler::load_loop() {
-    // Snapshot the generation this load is for.  If reload()/async_setup()
-    // bumps m_loadGeneration (starting a newer setup) while we're still here,
-    // bail before touching shared state — the new load owns the engine now.
-    const unsigned gen = m_loadGeneration.load();
-    m_loading.store(true);   // query_status() reports Loading while we run
+    // SIMPLE load: Engine ctor → init_states → warmup → ready → launch → exit.
+    // No loop, no abort checks, no generation bumps.  The UI blocks reload
+    // during Loading (can_reload()), so this load is NEVER interrupted —
+    // GPU warmup always runs to completion.  That's the whole crash fix.
     struct LoadingGuard {
-        std::atomic<bool>& flag;
-        ~LoadingGuard() { flag.store(false); }
-    } guard{m_loading};
-    sched_log("[Scheduler] load_loop: constructing Engine (model='%s' dev=%d, gen=%u)...",
-              m_modelPath.c_str(), m_deviceIndex, gen);
+        std::atomic<bool>& loading;
+        std::atomic<bool>& isLoading;
+        ~LoadingGuard() { loading.store(false); isLoading.store(false); }
+    } guard{m_loading, m_isLoading};
+    m_loading.store(true);    // query_status() reports Loading while we run
+    m_isLoading.store(true);  // can_reload() = false while we run
+    sched_log("[Scheduler] load_loop: constructing Engine (model='%s' dev=%d)...",
+              m_modelPath.c_str(), m_deviceIndex);
 
     // The Engine ctor (model load + ggml alloc) lives inside the icpx-built
     // core DLL, which SEH-guards any SYCL AV.  A try/catch (MSVC caller) turns
@@ -230,35 +240,21 @@ void TranscriptionScheduler::load_loop() {
         std::lock_guard<std::mutex> lk(m_engineMutex);
         m_engine = std::move(built);
     }
-    if (m_loadGeneration.load() != gen) {
-        sched_log("[Scheduler] load_loop: superseded post-ctor — exiting");
-        return;   // a newer reload owns the engine now
-    }
     if (failed || !m_engine) {
         m_engineFailed.store(true);
         return;
     }
-    if (m_loadAbort.load()) { sched_log("[Scheduler] load_loop: aborted post-ctor"); return; }
 
     // Create the 4 per-worker states on the owned engine, then warm up each
     // (SYCL JIT + buffer alloc).  This is the slow (~10-25s) part but it runs
     // here, never on the GUI thread.  No pipeline workers exist yet, so the
-    // GPU is touched by exactly one thread — safe.  Pass &m_loadAbort so a
-    // reload can interrupt the warmup mid-pass.
+    // GPU is touched by exactly one thread — safe.
     if (!init_states()) {
         sched_log("[Scheduler] load_loop: init_states failed");
         m_engineFailed.store(true);
         return;
     }
-    if (m_loadGeneration.load() != gen) {
-        sched_log("[Scheduler] load_loop: superseded post-init_states — exiting");
-        return;
-    }
-    warmup_states(&m_loadAbort);
-    if (m_loadGeneration.load() != gen || m_loadAbort.load()) {
-        sched_log("[Scheduler] load_loop: superseded/aborted post-warmup — exiting");
-        return;
-    }
+    warmup_states();
 
     // Engine + states + JIT are all primed → mark ready and, if Record was
     // already pressed (capture active), launch the pipeline threads now.
@@ -266,7 +262,7 @@ void TranscriptionScheduler::load_loop() {
         std::lock_guard<std::mutex> lk(m_launchMutex);
         m_engineReady.store(true);
     }
-    sched_log("[Scheduler] load_loop: engine ready (gen=%u)", gen);
+    sched_log("[Scheduler] load_loop: engine ready");
     launch_threads_if_ready();
 }
 
@@ -289,21 +285,12 @@ bool TranscriptionScheduler::async_setup(const std::string& model_path, int devi
                                                      : m_modelPath.substr(pos + 1);
         }
     }
-    // Bump the generation so any in-flight (stale) load_loop bails out, then
-    // start the new one.  If a load is already running it's joined first by the
-    // caller (reload); a bare async_setup when nothing is running just starts.
-    m_loadGeneration.fetch_add(1);
-    m_loadAbort.store(false);
-    if (m_loadThread.joinable()) {
-        // Shouldn't happen (reload joins first), but be safe: abort + join.
-        m_loadAbort.store(true);
-        m_loadThread.join();
-        m_loadAbort.store(false);
-        m_loadGeneration.fetch_add(1);   // this load is fresh
-    }
+    // Start the load on a fresh background thread.  No abort, no generation —
+    // the caller (ctor/reload) guarantees no load is in flight (the UI gates
+    // reload on can_reload(); async_setup from the ctor is the first load).
     m_loadThread = std::thread(&TranscriptionScheduler::load_loop, this);
-    sched_log("[Scheduler] async_setup: started (model='%s' dev=%d gen=%u)",
-              m_modelPath.c_str(), m_deviceIndex, m_loadGeneration.load());
+    sched_log("[Scheduler] async_setup: started (model='%s' dev=%d)",
+              m_modelPath.c_str(), m_deviceIndex);
     return true;
 }
 
@@ -311,19 +298,20 @@ void TranscriptionScheduler::reload(const std::string& model_path, int device_in
     sched_log("[Scheduler] reload: model='%s' dev=%d", model_path.c_str(), device_index);
     // 1. Stop any recording (joins the pipeline threads + frees the states).
     if (m_recording) stop();
-    // 2. Abort + join the background load thread so it's not touching the GPU /
-    //    m_engine when we drop the old engine below.
-    if (m_loadThread.joinable()) {
-        m_loadAbort.store(true);
-        m_workerCv.notify_all();
-        m_mergerCv.notify_all();
-        m_loadThread.join();
-        m_loadAbort.store(false);
-    }
-    // 3. Drop the old Engine + states + ready flag.  (States were freed in
+    // Set the loading gate NOW (before teardown) so can_reload() stays false
+    // for the whole reload — the UI can't sneak a second reload into the
+    // window between dropping the old engine and load_loop setting it.
+    m_isLoading.store(true);
+    m_loading.store(true);
+    // 2. Join the prior load thread.  The UI guaranteed idle via can_reload(),
+    //    so the thread has already finished — the join is instant.  (Defensive:
+    //    if it's somehow still joinable, block until it exits; never start a
+    //    second concurrent load_loop — that's the ggml-sycl AV root cause.)
+    if (m_loadThread.joinable()) m_loadThread.join();
+    // 3. Drop the old Engine + states + flags under m_engineMutex so the WHOLE
+    //    teardown is atomic vs query_status/workers.  (States were freed in
     //    stop() if we were recording; if we were just idle-but-ready, free
     //    them now on the caller thread — safe: no pipeline/workers running.)
-    //    Hold m_engineMutex so query_status doesn't read a half-reset engine.
     {
         std::lock_guard<std::mutex> lk(m_engineMutex);
         whisper_xpu::Engine* eng = m_engine.get();
@@ -331,12 +319,14 @@ void TranscriptionScheduler::reload(const std::string& model_path, int device_in
         m_states.clear();
         m_workerLang.clear();
         m_engine.reset();
+        m_engineReady.store(false);
+        m_engineFailed.store(false);
+        m_captureActive.store(false);
+        m_stopping.store(false);
     }
-    m_engineReady.store(false);
-    m_engineFailed.store(false);
-    m_captureActive.store(false);
-    m_stopping.store(false);
-    // 4. Start the new setup on a fresh background thread.
+    // 4. Start the new setup on a fresh background thread (sets m_isLoading).
+    m_modelPath = model_path;
+    m_deviceIndex = device_index;
     async_setup(model_path, device_index);
 }
 
@@ -405,9 +395,8 @@ bool TranscriptionScheduler::start_no_capture(whisper_xpu::Engine& sharedEngine)
     if (!init_states()) { m_sharedEngine = nullptr; return false; }
 
     // Same warmup as the app path — prime JIT/buffer/lang so file-replay
-    // workers don't backlog behind worker 0's first-window slow paths.  No
-    // abort flag in the test path (no reload thread to race).
-    warmup_states(nullptr);
+    // workers don't backlog behind worker 0's first-window slow paths.
+    warmup_states();
 
     // No AudioCapture — caller feeds the ring via feed_audio().  Log so it's
     // clear in headless runs that the mic was intentionally skipped.
@@ -421,8 +410,8 @@ bool TranscriptionScheduler::start_no_capture(whisper_xpu::Engine& sharedEngine)
     }
     m_windowerThread = std::thread(&TranscriptionScheduler::windower_loop, this);
     m_workerThreads.clear();
-    m_workerThreads.reserve(POOL_SIZE);
-    for (int i = 0; i < POOL_SIZE; ++i)
+    m_workerThreads.reserve(m_poolSize);
+    for (int i = 0; i < m_poolSize; ++i)
         m_workerThreads.emplace_back(&TranscriptionScheduler::worker_loop, this, i);
     m_mergerThread = std::thread(&TranscriptionScheduler::merger_loop, this);
     return true;
@@ -463,8 +452,8 @@ void TranscriptionScheduler::launch_threads_if_ready() {
     sched_log("[Scheduler] launching pipeline threads (engine ready + capture active)");
     m_windowerThread = std::thread(&TranscriptionScheduler::windower_loop, this);
     m_workerThreads.clear();
-    m_workerThreads.reserve(POOL_SIZE);
-    for (int i = 0; i < POOL_SIZE; ++i)
+    m_workerThreads.reserve(m_poolSize);
+    for (int i = 0; i < m_poolSize; ++i)
         m_workerThreads.emplace_back(&TranscriptionScheduler::worker_loop, this, i);
     m_mergerThread = std::thread(&TranscriptionScheduler::merger_loop, this);
 }

@@ -57,6 +57,16 @@ AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size
     // (CLI args, when present, still win.)
     LoadSettings();
 
+    // (No ctor-time SYCL usability probe here: calling get_device_info() /
+    // get_available_devices() runs a SYCL backend-init probe, and SYCL calls
+    // must be deferred until the event loop is running — doing it in the ctor
+    // (pre event-loop) stalls startup and the model never loads.  Device
+    // usability is checked instead inside the Settings dialog, where
+    // m_deviceList is already populated by OnIdleInit (post event-loop) with
+    // the usable flag.  If a persisted/CLI device index is unusable, the user
+    // changes it in Settings; the load on an unusable device would crash at
+    // SYCL init, but every enumerated device's driver currently inits fine.)
+
     // Populate cached device/mic lists and update status bar.
     // SYCL device enumeration is deferred to OnIdleInit (after event
     // loop starts) via whisper_xpu_sycl_core.dll.  The DLL is
@@ -139,7 +149,10 @@ void AppFrame::RefreshUI(const SchedulerStatus& s) {
             m_recordBtn->Enable(false);
             break;
         case SchedulerState::Loading:
-            SetStatusText("Loading model…", STATUS_MIC);
+            // Source is compiled /utf-8 so "…" is UTF-8 bytes; the system
+            // locale (GBK 936) would mis-decode the ellipsis → garbled
+            // "[loading***".  wxString::FromUTF8 decodes the bytes as UTF-8.
+            SetStatusText(wxString::FromUTF8("Loading model…"), STATUS_MIC);
             m_recordBtn->SetLabel("Record");
             // Record stays enabled: pressing it during load starts capture
             // immediately; the pipeline launches when warmup finishes.
@@ -151,7 +164,7 @@ void AppFrame::RefreshUI(const SchedulerStatus& s) {
             m_recordBtn->Enable(true);
             break;
         case SchedulerState::Recording:
-            SetStatusText("Recording…", STATUS_MIC);
+            SetStatusText(wxString::FromUTF8("Recording…"), STATUS_MIC);
             m_recordBtn->SetLabel("Stop");
             m_recordBtn->Enable(true);
             m_recording.store(true);
@@ -263,22 +276,28 @@ void AppFrame::CreateStatusBarFields() {
 // ──────────────────────────────────────────
 
 void AppFrame::UpdateStatusBar() {
+    // All rendered strings are UTF-8 bytes (source compiled /utf-8; device/
+    // mic/model names are UTF-8).  wxString(const char*) would decode them
+    // using the system locale (GBK 936 on Chinese Windows) and garble any
+    // non-ASCII (e.g. the "…" ellipsis, or a localized device/mic name).  Use
+    // wxString::FromUTF8 so the bytes are decoded as UTF-8 regardless of the
+    // system code page.
     // Mic field — show actual device name, append (Default) if system default
     wxString micLabel = wxT("Mic: N/A");
     if (m_micIndex == kMicDefault) {
         for (const auto& m : m_micList) {
             if (m.is_default) {
-                micLabel = wxT("Mic: ") + wxString(m.name) + wxT(" (Default)");
+                micLabel = wxT("Mic: ") + wxString::FromUTF8(m.name) + wxT(" (Default)");
                 break;
             }
         }
         if (micLabel == wxT("Mic: N/A") && !m_micList.empty()) {
-            micLabel = wxT("Mic: ") + wxString(m_micList[0].name);
+            micLabel = wxT("Mic: ") + wxString::FromUTF8(m_micList[0].name);
         }
     } else {
         for (const auto& m : m_micList) {
             if (m.index == m_micIndex) {
-                micLabel = wxT("Mic: ") + wxString(m.name);
+                micLabel = wxT("Mic: ") + wxString::FromUTF8(m.name);
                 break;
             }
         }
@@ -292,7 +311,7 @@ void AppFrame::UpdateStatusBar() {
     } else if (m_deviceIndex >= 0) {
         for (const auto& d : m_deviceList) {
             if (d.index == m_deviceIndex) {
-                devLabel = wxT("Device: ") + wxString(d.to_string());
+                devLabel = wxT("Device: ") + wxString::FromUTF8(d.to_string());
                 break;
             }
         }
@@ -300,7 +319,7 @@ void AppFrame::UpdateStatusBar() {
         // Auto-select: show first GPU if available
         for (const auto& d : m_deviceList) {
             if (d.index >= 0) {
-                devLabel = wxT("Device: ") + wxString(d.to_string()) + wxT(" [Auto]");
+                devLabel = wxT("Device: ") + wxString::FromUTF8(d.to_string()) + wxT(" [Auto]");
                 break;
             }
         }
@@ -315,9 +334,9 @@ void AppFrame::UpdateStatusBar() {
     SchedulerStatus s = m_scheduler ? m_scheduler->query_status() : SchedulerStatus{};
     wxString modelLabel = "No model";
     if (!s.model_name.empty()) {
-        modelLabel = s.model_name;
+        modelLabel = wxString::FromUTF8(s.model_name);
         switch (s.state) {
-            case SchedulerState::Loading: modelLabel += " [loading…]"; break;
+            case SchedulerState::Loading: modelLabel += wxString::FromUTF8(" [loading…]"); break;
             case SchedulerState::Ready:
             case SchedulerState::Recording:
                 modelLabel += s.device_desc.find("CPU") == std::string::npos
@@ -402,24 +421,44 @@ void AppFrame::ShowSettingsDialog() {
     root->Add(micBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
 
     // ── XPU Device ──
+    // Uses wxListBox (not wxChoice) so unusable devices can be GREYED OUT
+    // (wxChoice can't disable individual rows on Windows).  An iGPU whose
+    // driver can't init a SYCL backend (probe_device_usable_raw in
+    // device_detect.cpp) shows here but is disabled — the user sees it exists
+    // but can't pick it.  Single-select (no wxLB_MULTIPLE).
     std::vector<wxString> devLabels;
     std::vector<int>       devIndices;
+    std::vector<bool>      devUsable;   // parallel: can this device be selected?
     devLabels.push_back("Auto");
     devIndices.push_back(kDeviceAuto);
+    devUsable.push_back(true);
 
     int devSel = 0;
     for (size_t i = 0; i < m_deviceList.size(); ++i) {
         wxString label(m_deviceList[i].to_string());
         if (label.Trim().IsEmpty()) continue;
+        bool usable = m_deviceList[i].usable;
+        if (!usable) label += "  (driver unavailable)";  // visible even when greyed
         if (m_deviceList[i].index == m_deviceIndex) devSel = (int)devLabels.size();
         devLabels.push_back(label);
         devIndices.push_back((int)i);
+        devUsable.push_back(usable);
     }
 
     auto* devBox = new wxStaticBoxSizer(wxHORIZONTAL, &dlg, "Device");
+    // wxChoice (dropdown): wxWidgets' standard list/choice controls on MSW
+    // canNOT disable individual rows (only the whole control).  So unusable
+    // devices are NOT hidden — they appear with a "(driver unavailable)"
+    // suffix, and if the user picks one the OK handler refuses to apply it
+    // (reverts).  This is the closest stable approximation to "greyed out"
+    // without swapping in a heavyweight wxDataView/owner-draw control.
     auto* devChoice = new wxChoice(devBox->GetStaticBox(), wxID_ANY);
     for (size_t i = 0; i < devLabels.size(); ++i)
         devChoice->Append(devLabels[i]);
+    // If the persisted selection is unusable, fall back to Auto (row 0) so the
+    // dialog opens on a valid selection instead of an unusable one.
+    if (devSel >= 0 && devSel < (int)devUsable.size() && !devUsable[devSel])
+        devSel = 0;
     devChoice->SetSelection(devSel);
     devBox->Add(devChoice, 1, wxEXPAND | wxALL, 4);
     root->Add(devBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
@@ -526,6 +565,21 @@ void AppFrame::ShowSettingsDialog() {
         wxString newHotkey       = hotkeyText->GetValue();
         int zhSel = zhChoice->GetSelection();   // -1 if none
 
+        // Refuse an unusable device selection (the row is marked
+        // "(driver unavailable)").  Keep the model/mic/zh changes but don't
+        // switch the device to one whose driver can't init a SYCL backend.
+        if (newDevIdx >= 0) {
+            auto di = whisper_xpu::get_device_info(newDevIdx);
+            if (!di.usable) {
+                wxMessageBox(
+                    wxString::FromUTF8("The selected device '") + di.name +
+                    wxString::FromUTF8("' is unusable (its driver rejected "
+                        "SYCL backend init). Pick the dGPU or CPU."),
+                    "Device Unavailable", wxOK | wxICON_WARNING);
+                newDevIdx = m_deviceIndex;   // keep the old, usable device
+            }
+        }
+
         bool devChanged   = (newDevIdx != m_deviceIndex);
         bool modelChanged = (newModelPath != m_modelPath);
 
@@ -543,13 +597,43 @@ void AppFrame::ShowSettingsDialog() {
         UpdateStatusBar();
 
         // Immediate reload (never blocks the GUI): the scheduler stops any
-        // recording, aborts+joins the old load thread, drops the old engine,
-        // and starts a fresh background load.  The sync thread observes
+        // recording, joins the (already-finished) load thread, drops the old
+        // engine, and starts a fresh background load.  The sync thread observes
         // Loading → Ready/Failed and RefreshUI flips the status bar.
-        if ((devChanged || modelChanged) && !m_modelPath.empty()) {
+        //
+        // CRASH GUARD: never reload while a load is in progress.  Aborting GPU
+        // warmup mid-pass AVs in ggml-sycl (locks can't prevent it — the SYCL
+        // JIT/backend-init is an opaque call that ignores abort flags).  The UI
+        // blocks the danger instead: can_reload() == false ⇒ the model/device
+        // change is kept in Settings (already persisted above) but the reload is
+        // refused until the in-flight load finishes; the user re-opens Settings
+        // and hits OK again to apply it.  This keeps the scheduler simple — no
+        // abort flag, no generation counter, no discard-and-restart command
+        // buffer — because the load thread is NEVER interrupted.
+        if (m_scheduler && (devChanged || modelChanged) && !m_modelPath.empty()) {
+            if (!m_scheduler->can_reload()) {
+                wxMessageBox(
+                    "The model is still loading — please wait for it to finish "
+                    "(the status bar shows Loading), then reopen Settings and "
+                    "press OK to apply this change.\n\n"
+                    "Switching models mid-load is blocked because interrupting "
+                    "GPU warmup can crash the app.",
+                    "Model Still Loading",
+                    wxOK | wxICON_INFORMATION);
+                return;  // keep the change in Settings; reload refused (safe)
+            }
             m_scheduler->reload(m_modelPath, m_deviceIndex);
         } else if (m_modelPath.empty() && m_scheduler) {
             // Switched to no model — reload to an empty path drops the engine.
+            // Still gate on can_reload() so we never interrupt an in-flight load.
+            if (!m_scheduler->can_reload()) {
+                wxMessageBox(
+                    "The model is still loading — please wait for it to finish, "
+                    "then reopen Settings to clear the model.",
+                    "Model Still Loading",
+                    wxOK | wxICON_INFORMATION);
+                return;
+            }
             m_scheduler->reload(m_modelPath, m_deviceIndex);
         }
     }
@@ -571,6 +655,19 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
             if (!m_scheduler || m_modelPath.empty()) {
                 wxMessageBox("Please load a model first (Settings).",
                              "No Model", wxOK | wxICON_INFORMATION);
+                return;
+            }
+            // Block Record while the model is still loading — same gate as
+            // Settings: the load thread isn't interruptible, and starting
+            // capture mid-load (even though it buffers) is a confusing UX.
+            // Wait for engine ready before allowing Record.
+            if (!m_scheduler->can_reload()) {
+                wxMessageBox(
+                    wxString::FromUTF8("The model is still loading — please "
+                        "wait for it to finish (status bar shows "
+                        "\xe2\x80\x9cLoading model\xe2\x80\xa6\xe2\x80\x9d) "
+                        "before starting recording."),
+                    "Still Loading", wxOK | wxICON_INFORMATION);
                 return;
             }
             if (!m_scheduler->start(m_micIndex)) {
@@ -612,8 +709,25 @@ void AppFrame::OnStatusBarClick(wxMouseEvent& ev) {
         wxRect r;
         sb->GetFieldRect(i, r);
         if (r.Contains(ev.GetPosition())) {
-            if (i == STATUS_SETTINGS)
-                ShowSettingsDialog();
+            if (i == STATUS_SETTINGS) {
+                // Don't open Settings while a model is loading — switching
+                // models mid-load can't be done safely (the load thread isn't
+                // interruptible), and entering Settings then would only end in a
+                // "still loading" refusal.  The status bar already shows
+                // "Loading model…"; tell the user to wait instead of opening
+                // the dialog.  (Record IS allowed during load — capture buffers
+                // in the ring and the pipeline launches when warmup finishes.)
+                if (m_scheduler && !m_scheduler->can_reload()) {
+                    wxMessageBox(
+                        wxString::FromUTF8("The model is still loading — please "
+                            "wait for it to finish (status bar shows "
+                            "\xe2\x80\x9cLoading model\xe2\x80\xa6\xe2\x80\x9d) "
+                            "before opening Settings to switch the model or device."),
+                        "Still Loading", wxOK | wxICON_INFORMATION);
+                } else {
+                    ShowSettingsDialog();
+                }
+            }
             break;
         }
     }
