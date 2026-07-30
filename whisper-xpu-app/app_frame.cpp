@@ -57,6 +57,31 @@ AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size
     // (CLI args, when present, still win.)
     LoadSettings();
 
+    // Guard against a persisted iGPU device index.  An old whisper_xpu.ini
+    // (or a CLI --device) may point at an integrated GPU (e.g. device=1, the
+    // Intel Iris Xe).  Loading on the iGPU AVs: the SYCL JIT rejects the
+    // `-ze-intel-greater-than-4GB-buffer-required` build option on its older
+    // NEO driver → the first GPU op crashes (and the status bar shows garbled
+    // device text before the AV).  If the selected index is an iGPU, fall back
+    // to the first DISCRETE GPU (the Arc A770M) instead of starting a doomed
+    // load.  get_available_devices() is SEH-guarded inside the SYCL core DLL,
+    // so this call is safe even before the event loop starts.  (We can't fall
+    // back to kDeviceAuto — that means "no GPU" at the Engine layer, not
+    // "auto-pick a GPU".)  See memory [[igpu-iris-xe-not-usable]].
+    if (m_deviceIndex >= 0) {
+        auto di = whisper_xpu::get_device_info(m_deviceIndex);
+        if (di.device_class == DeviceClass::GPU_Integrated) {
+            int dGPU = -1;
+            for (const auto& d : whisper_xpu::get_available_devices())
+                if (d.device_class == DeviceClass::GPU_Discrete) { dGPU = d.index; break; }
+            wxLogMessage("[app] persisted/CLI device %d is the iGPU '%s' — unusable "
+                        "(driver rejects the >4GB-buffer SYCL build option → crash). "
+                        "Falling back to dGPU index %d.",
+                        m_deviceIndex, di.name.c_str(), dGPU);
+            m_deviceIndex = (dGPU >= 0) ? dGPU : kDeviceCPU;
+        }
+    }
+
     // Populate cached device/mic lists and update status bar.
     // SYCL device enumeration is deferred to OnIdleInit (after event
     // loop starts) via whisper_xpu_sycl_core.dll.  The DLL is
@@ -411,6 +436,16 @@ void AppFrame::ShowSettingsDialog() {
     for (size_t i = 0; i < m_deviceList.size(); ++i) {
         wxString label(m_deviceList[i].to_string());
         if (label.Trim().IsEmpty()) continue;
+        // Hide integrated GPUs (Intel Iris Xe).  Loading on the iGPU crashes:
+        // the SYCL kernel JIT calls urProgramBuildExp with the build option
+        // `-ze-intel-greater-than-4GB-buffer-required`, which the iGPU's older
+        // NEO driver rejects (UR_RESULT_ERROR_UNSUPPORTED_FEATURE) → the kernel
+        // never builds → the first GPU op AVs (0xC0000005) and the status bar
+        // shows garbled device text.  Hide it until the driver/ggml issue is
+        // solved (see memory [[igpu-iris-xe-not-usable]]).  The discrete Arc
+        // A770M (GPU_Discrete) + CPU remain selectable.
+        if (m_deviceList[i].device_class == DeviceClass::GPU_Integrated)
+            continue;
         if (m_deviceList[i].index == m_deviceIndex) devSel = (int)devLabels.size();
         devLabels.push_back(label);
         devIndices.push_back((int)i);
