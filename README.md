@@ -199,7 +199,7 @@ The zip bundles the exe, all runtime DLLs, `ggml-tiny.bin` + the VAD model,
 the OpenCC zh-converter dicts, and a default `whisper_xpu.ini` (tiny + CPU).
 Default `OFF` — dev builds skip the packaging cost.
 
-## Notes (注意事项)
+## Notes
 
 A few non-obvious build constraints worth knowing before compiling.
 
