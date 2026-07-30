@@ -89,10 +89,9 @@ Then set it as the default — either open Settings and pick it, or edit
 model=models/ggml-large-v3-turbo-q5_0.bin
 ```
 
-> **On the GPU, prefer `q5_0` over `q8_0`.** Verified: `ggml-large-v3-turbo-q8_0.bin`
-> transcribes correctly on **CPU** (172 chars, real text) but produces **empty
-> output on the Intel Arc GPU** (0 chars) — while the `q5_0` models above work
-> on both. Use `q5_0` on the GPU.
+> **On the GPU, prefer `q5_0` over `q8_0`.** The `q8_0` models have an issue on
+> the Intel Arc GPU (problem is in the upstream ggml-sycl operators); `q5_0`
+> works fine on both CPU and GPU.
 
 ## Build from source (verified)
 
