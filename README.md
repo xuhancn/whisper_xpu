@@ -89,10 +89,12 @@ Then set it as the default — either open Settings and pick it, or edit
 model=models/ggml-large-v3-turbo-q5_0.bin
 ```
 
-> **Avoid the `q8_0` quantization on the GPU** for now: the `q8_0` SYCL
-> dequant/mat-mul kernel has a known issue on Intel Arc (large-v3 / turbo
-> produce garbage on the GPU while working on CPU). The `q5_0` models above
-> are unaffected — use them on the GPU.
+> **Avoid `q8_0` on the GPU for now.** On Intel Arc, the `q8_0` models
+> (large-v3 / turbo) produce garbage on the GPU while transcribing correctly
+> on the CPU — an upstream **whisper.cpp / ggml-sycl** issue (the `q8_0`
+> SYCL dequant/mat-mul path), not this project's code. The `q5_0` models above
+> are unaffected; use them on the GPU. (No upstream issue link found — verify
+> against the current ggml-org/whisper.cpp master before assuming it persists.)
 
 ## Build from source (verified)
 
