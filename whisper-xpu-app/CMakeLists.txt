@@ -121,7 +121,7 @@ endif()
 #   whisper_xpu_app.exe + ALL DLLs (ggml/whisper/sycl/oneAPI/MKL/L0)
 #   app256.png (title-bar icon)
 #   whisper_xpu.ini (defaults: tiny model, CPU device — safe, runs anywhere)
-#   models/ggml-tiny.bin, models/ggml-vad.bin
+#   models/ggml-tiny.bin, models/vad_model/ggml-vad.bin
 #   models/opencc/{config,dictionary,...}   (zh converter dicts, exe-relative)
 # → zipped to whisper_xpu_v${WHISPER_XPU_VERSION}.zip beside release/
 if(WHISPER_XPU_RELEASE)
@@ -183,13 +183,15 @@ if(WHISPER_XPU_RELEASE)
         endforeach()
     endif()
 
-    # 4. Models: tiny (small, runs anywhere) + VAD model.
+    # 4. Models: tiny (small, runs anywhere) + VAD model (in its own subdir,
+    #    mirroring the source-tree layout models/vad_model/).
     add_custom_command(TARGET release_package POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "${_rel_dir}/models"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${_rel_dir}/models/vad_model"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_SOURCE_DIR}/models/ggml-tiny.bin" "${_rel_dir}/models/"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/models/vad_model/ggml-vad.bin" "${_rel_dir}/models/"
+            "${CMAKE_SOURCE_DIR}/models/vad_model/ggml-vad.bin" "${_rel_dir}/models/vad_model/"
         COMMENT "release_package: models")
 
     # 5. OpenCC data → models/opencc (zh_converter reads WHISPER_XPU_OPENCC_DATA_DIR,

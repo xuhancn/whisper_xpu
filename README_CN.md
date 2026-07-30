@@ -184,8 +184,10 @@ cmake --build build-gpu --target release_package
 # → build-gpu\whisper_xpu_v1.0.0.zip
 ```
 
-zip 内含 exe、所有运行时 DLL、`ggml-tiny.bin` + VAD 模型、OpenCC 中文转换词典、
-和一个默认 `whisper_xpu.ini`（tiny + CPU）。默认 `OFF` —— 开发构建跳过打包开销。
+zip 内含 exe + 所有运行时 DLL、`models/` 下的两个小模型
+（`ggml-tiny.bin` 和 `vad_model/ggml-vad.bin`）、`models/opencc/` 下的
+OpenCC 中文转换词典、和一个默认 `whisper_xpu.ini`（tiny + CPU）。
+默认 `OFF` —— 开发构建跳过打包开销。
 
 ---
 
