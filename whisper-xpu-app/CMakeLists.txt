@@ -5,6 +5,7 @@ add_executable(whisper_xpu_app WIN32
     src/sched_log.cpp
     src/transcription_scheduler.cpp
     zh_converter.cpp
+    app.rc
 )
 
 # Vendored OpenCC text dicts (third_party/opencc-data) — read at runtime by
@@ -48,6 +49,13 @@ add_custom_command(TARGET whisper_xpu_app POST_BUILD
         $<TARGET_FILE:whisper_xpu_sycl_core>
         $<TARGET_FILE_DIR:whisper_xpu_app>
     COMMENT "Copying whisper_xpu_sycl_core.dll to app output directory"
+)
+# ── Copy the app icon PNG (loaded at runtime by SetIcon for the title bar) ──
+add_custom_command(TARGET whisper_xpu_app POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources/app256.png"
+        $<TARGET_FILE_DIR:whisper_xpu_app>
+    COMMENT "Copying app icon to app output directory"
 )
 # ggml/whisper/ggml-sycl now ship as SHARED DLLs (see top-level CMakeLists.txt);
 # co-locate them beside the app exe so it loads at runtime.

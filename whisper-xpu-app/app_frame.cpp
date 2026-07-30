@@ -9,6 +9,9 @@
 #include <wx/msgdlg.h>
 #include <wx/statbox.h>
 #include <wx/filename.h>
+#include <wx/icon.h>
+#include <wx/image.h>
+#include <wx/stdpaths.h>
 #include <wx/config.h>      // wxFileConfig-backed wxConfigBase for whisper_xpu.ini
 #include <wx/log.h>
 #include <chrono>
@@ -51,6 +54,21 @@ AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size
     CreateControls();
     SetMinSize(wxSize(600, 350));
     SetSize(900, 600);
+
+    // App icon (title bar + taskbar).  Load the 256px PNG co-located beside
+    // the exe (CMake POST_BUILD copies resources/*.png next to the exe).  If
+    // the file is absent (e.g. running from a build dir without the copy
+    // step), silently fall back to the default wx icon.
+    {
+        wxFileName iconPath(wxStandardPaths::Get().GetExecutablePath());
+        iconPath.SetFullName("app256.png");
+        if (iconPath.FileExists()) {
+            wxInitAllImageHandlers();
+            wxIcon icn;
+            icn.CopyFromBitmap(wxBitmap(iconPath.GetFullPath(), wxBITMAP_TYPE_PNG));
+            SetIcon(icn);
+        }
+    }
 
     // Persisted settings: if no --model/--device on the CLI, load the last
     // selection from whisper_xpu.ini so the user's choice survives restarts.

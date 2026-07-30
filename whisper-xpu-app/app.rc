@@ -1,0 +1,8 @@
+// Application icon resource — sets the .exe's icon shown in Explorer,
+// taskbar, and Alt-Tab.  The .ico is multi-size (256/48/32/16) so Windows
+// picks the right size per context.  The window title-bar icon is set
+// separately at runtime via SetIcon() (loads app256.png beside the exe).
+//
+// ID 1 = the app icon; Windows uses the lowest-numbered ICON resource as
+// the exe's default icon.
+1 ICON "resources/app.ico"
