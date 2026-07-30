@@ -259,9 +259,21 @@ private:
     ChunkCallback m_on_chunk;
 
     // Worker pool — ONE Engine (owned in the app path, borrowed in the test
-    // path) + 4 per-worker whisper_state*s (own KV cache + compute buffers),
+    // path) + N per-worker whisper_state*s (own KV cache + compute buffers),
     // created in start()/start_no_capture()/load_loop(), freed in stop().
-    static constexpr int POOL_SIZE = 4;
+    // POOL_SIZE is runtime-decided in init_states(): GPU=1, CPU=4.  WHY: on
+    // the GPU, all worker states' whisper_full_with_state calls go through the
+    // SAME SYCL default_queue (ggml-sycl's stream() returns the device's
+    // singleton default queue).  sycl::queue is NOT thread-safe for concurrent
+    // submit from multiple host threads → async SYCL error →
+    // ggml_backend_sycl_synchronize aborts (c0000409) or AVs (c0000005 reading
+    // 0xFFFF...FFFF).  One GPU worker serializes queue access with zero locks
+    // (the pool is just 1).  CPU is fine with 4 workers (ggml-cpu is
+    // thread-safe / thread-pooled per call).  See memory
+    // [[ze-driver-crash-under-debugger]] (root cause: shared SYCL queue).
+    static constexpr int POOL_SIZE_CPU = 4;
+    static constexpr int POOL_SIZE_GPU = 1;
+    int m_poolSize = POOL_SIZE_CPU;   // set in init_states() per engine
     // m_engineMutex guards m_engine / m_sharedEngine against reload()/dtor
     // mutating them while worker/query_status threads read engine().  Workers
     // run only while m_engineReady (reload stop()s them first), but the UI's

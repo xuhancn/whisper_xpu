@@ -132,15 +132,19 @@ bool TranscriptionScheduler::init_states() {
         sched_log("[Scheduler] init_states: no engine");
         return false;
     }
+    // POOL_SIZE: GPU=1, CPU=4.  On GPU, all workers would share the SYCL
+    // default_queue (singleton) → concurrent submit is SYCL UB → crash.
+    // One GPU worker serializes GPU access with no lock.  CPU is safe with 4.
+    m_poolSize = eng->is_gpu_enabled() ? POOL_SIZE_GPU : POOL_SIZE_CPU;
     int hw = (int)std::thread::hardware_concurrency();
     if (hw < 1) hw = 4;
-    m_nThreadsPerWorker = std::max(1, hw / POOL_SIZE);
+    m_nThreadsPerWorker = std::max(1, hw / m_poolSize);
 
     m_states.clear();
     m_workerLang.clear();
-    m_states.reserve(POOL_SIZE);
-    m_workerLang.resize(POOL_SIZE);  // empty ⇒ first window auto-detects
-    for (int i = 0; i < POOL_SIZE; ++i) {
+    m_states.reserve(m_poolSize);
+    m_workerLang.resize(m_poolSize);  // empty ⇒ first window auto-detects
+    for (int i = 0; i < m_poolSize; ++i) {
         whisper_state* st = eng->create_state();
         if (!st) {
             sched_log("[Scheduler] state %d create failed — freeing partial", i);
@@ -151,8 +155,9 @@ bool TranscriptionScheduler::init_states() {
         }
         m_states.push_back(st);
     }
-    sched_log("[Scheduler] pool: 1 Engine + %d states × %d threads = %d total (hw=%d)",
-              POOL_SIZE, m_nThreadsPerWorker, POOL_SIZE * m_nThreadsPerWorker, hw);
+    sched_log("[Scheduler] pool: 1 Engine + %d states × %d threads = %d total (hw=%d, %s)",
+              m_poolSize, m_nThreadsPerWorker, m_poolSize * m_nThreadsPerWorker, hw,
+              eng->is_gpu_enabled() ? "GPU" : "CPU");
     return true;
 }
 
@@ -181,7 +186,8 @@ void TranscriptionScheduler::warmup_states() {
     std::vector<float> silence(kWarmupN, 0.0f);
 
     whisper_xpu::Engine* eng = engine();
-    for (int i = 0; i < POOL_SIZE; ++i) {
+    const int n = (int)m_states.size();
+    for (int i = 0; i < n; ++i) {
         if (!m_states[i] || !eng) continue;
         std::string lang;  // throwaway — auto-detects on silence, result
                            // discarded; m_workerLang[i] stays empty.
@@ -195,7 +201,7 @@ void TranscriptionScheduler::warmup_states() {
                   i, ms, r.segments.size());
     }
     sched_log("[Scheduler] warmup done — JIT/buffer primed for all %d states",
-              POOL_SIZE);
+              n);
 }
 
 // ────────────────────────────────────────────────────────────
@@ -404,8 +410,8 @@ bool TranscriptionScheduler::start_no_capture(whisper_xpu::Engine& sharedEngine)
     }
     m_windowerThread = std::thread(&TranscriptionScheduler::windower_loop, this);
     m_workerThreads.clear();
-    m_workerThreads.reserve(POOL_SIZE);
-    for (int i = 0; i < POOL_SIZE; ++i)
+    m_workerThreads.reserve(m_poolSize);
+    for (int i = 0; i < m_poolSize; ++i)
         m_workerThreads.emplace_back(&TranscriptionScheduler::worker_loop, this, i);
     m_mergerThread = std::thread(&TranscriptionScheduler::merger_loop, this);
     return true;
@@ -446,8 +452,8 @@ void TranscriptionScheduler::launch_threads_if_ready() {
     sched_log("[Scheduler] launching pipeline threads (engine ready + capture active)");
     m_windowerThread = std::thread(&TranscriptionScheduler::windower_loop, this);
     m_workerThreads.clear();
-    m_workerThreads.reserve(POOL_SIZE);
-    for (int i = 0; i < POOL_SIZE; ++i)
+    m_workerThreads.reserve(m_poolSize);
+    for (int i = 0; i < m_poolSize; ++i)
         m_workerThreads.emplace_back(&TranscriptionScheduler::worker_loop, this, i);
     m_mergerThread = std::thread(&TranscriptionScheduler::merger_loop, this);
 }

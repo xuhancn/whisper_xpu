@@ -85,6 +85,27 @@ static int enum_sycl_devices_raw(RawSyclDevice* out, int max_count) {
         return 0;
     }
 }
+
+// Init-level usability probe, SEH-guarded (POD-only, like enum_sycl_devices_raw).
+// Constructs + immediately frees a SYCL backend for `dev`.  Returns false if
+// the SYCL runtime / Level Zero driver access-violates during backend setup.
+// HONEST LIMIT: this catches driver faults at BACKEND-INIT time only.  A
+// future COMPUTE-level regression (e.g. the old urProgramBuildExp AV that
+// rejected `-ze-intel-greater-than-4GB-buffer-required`) happens later, during
+// kernel JIT/warmup, and is NOT caught here — it would still hard-crash at
+// load time.  The UI greys (but does NOT hide) devices this returns false for,
+// so the user sees the device exists but can't pick it.  See memory
+// [[igpu-iris-xe-not-usable]] / [[ze-driver-crash-under-debugger]].
+static bool probe_device_usable_raw(int dev) {
+    __try {
+        ggml_backend_t backend = ggml_backend_sycl_init(dev);
+        if (!backend) return false;
+        ggml_backend_free(backend);
+        return true;
+    } __except(1) {
+        return false;
+    }
+}
 #endif
 
 // ---------------------------------------------------------------------------
@@ -114,6 +135,8 @@ WHISPER_XPU_SYCL_API std::vector<DeviceInfo> get_available_devices() {
         inf.compute_units = 0;        // not exposed by the ggml API
         inf.total_mem     = raw[dev].total_mem;
         inf.free_mem      = raw[dev].free_mem;
+        // SEH-guarded init probe: usable unless the driver AVs at backend setup.
+        inf.usable        = probe_device_usable_raw(dev);
         list.push_back(inf);
     }
 #endif

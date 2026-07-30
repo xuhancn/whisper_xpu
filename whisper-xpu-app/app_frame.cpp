@@ -57,30 +57,15 @@ AppFrame::AppFrame(const wxString& title, const wxPoint& pos, const wxSize& size
     // (CLI args, when present, still win.)
     LoadSettings();
 
-    // Guard against a persisted iGPU device index.  An old whisper_xpu.ini
-    // (or a CLI --device) may point at an integrated GPU (e.g. device=1, the
-    // Intel Iris Xe).  Loading on the iGPU AVs: the SYCL JIT rejects the
-    // `-ze-intel-greater-than-4GB-buffer-required` build option on its older
-    // NEO driver → the first GPU op crashes (and the status bar shows garbled
-    // device text before the AV).  If the selected index is an iGPU, fall back
-    // to the first DISCRETE GPU (the Arc A770M) instead of starting a doomed
-    // load.  get_available_devices() is SEH-guarded inside the SYCL core DLL,
-    // so this call is safe even before the event loop starts.  (We can't fall
-    // back to kDeviceAuto — that means "no GPU" at the Engine layer, not
-    // "auto-pick a GPU".)  See memory [[igpu-iris-xe-not-usable]].
-    if (m_deviceIndex >= 0) {
-        auto di = whisper_xpu::get_device_info(m_deviceIndex);
-        if (di.device_class == DeviceClass::GPU_Integrated) {
-            int dGPU = -1;
-            for (const auto& d : whisper_xpu::get_available_devices())
-                if (d.device_class == DeviceClass::GPU_Discrete) { dGPU = d.index; break; }
-            wxLogMessage("[app] persisted/CLI device %d is the iGPU '%s' — unusable "
-                        "(driver rejects the >4GB-buffer SYCL build option → crash). "
-                        "Falling back to dGPU index %d.",
-                        m_deviceIndex, di.name.c_str(), dGPU);
-            m_deviceIndex = (dGPU >= 0) ? dGPU : kDeviceCPU;
-        }
-    }
+    // (No ctor-time SYCL usability probe here: calling get_device_info() /
+    // get_available_devices() runs a SYCL backend-init probe, and SYCL calls
+    // must be deferred until the event loop is running — doing it in the ctor
+    // (pre event-loop) stalls startup and the model never loads.  Device
+    // usability is checked instead inside the Settings dialog, where
+    // m_deviceList is already populated by OnIdleInit (post event-loop) with
+    // the usable flag.  If a persisted/CLI device index is unusable, the user
+    // changes it in Settings; the load on an unusable device would crash at
+    // SYCL init, but every enumerated device's driver currently inits fine.)
 
     // Populate cached device/mic lists and update status bar.
     // SYCL device enumeration is deferred to OnIdleInit (after event
@@ -436,34 +421,44 @@ void AppFrame::ShowSettingsDialog() {
     root->Add(micBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
 
     // ── XPU Device ──
+    // Uses wxListBox (not wxChoice) so unusable devices can be GREYED OUT
+    // (wxChoice can't disable individual rows on Windows).  An iGPU whose
+    // driver can't init a SYCL backend (probe_device_usable_raw in
+    // device_detect.cpp) shows here but is disabled — the user sees it exists
+    // but can't pick it.  Single-select (no wxLB_MULTIPLE).
     std::vector<wxString> devLabels;
     std::vector<int>       devIndices;
+    std::vector<bool>      devUsable;   // parallel: can this device be selected?
     devLabels.push_back("Auto");
     devIndices.push_back(kDeviceAuto);
+    devUsable.push_back(true);
 
     int devSel = 0;
     for (size_t i = 0; i < m_deviceList.size(); ++i) {
         wxString label(m_deviceList[i].to_string());
         if (label.Trim().IsEmpty()) continue;
-        // Hide integrated GPUs (Intel Iris Xe).  Loading on the iGPU crashes:
-        // the SYCL kernel JIT calls urProgramBuildExp with the build option
-        // `-ze-intel-greater-than-4GB-buffer-required`, which the iGPU's older
-        // NEO driver rejects (UR_RESULT_ERROR_UNSUPPORTED_FEATURE) → the kernel
-        // never builds → the first GPU op AVs (0xC0000005) and the status bar
-        // shows garbled device text.  Hide it until the driver/ggml issue is
-        // solved (see memory [[igpu-iris-xe-not-usable]]).  The discrete Arc
-        // A770M (GPU_Discrete) + CPU remain selectable.
-        if (m_deviceList[i].device_class == DeviceClass::GPU_Integrated)
-            continue;
+        bool usable = m_deviceList[i].usable;
+        if (!usable) label += "  (driver unavailable)";  // visible even when greyed
         if (m_deviceList[i].index == m_deviceIndex) devSel = (int)devLabels.size();
         devLabels.push_back(label);
         devIndices.push_back((int)i);
+        devUsable.push_back(usable);
     }
 
     auto* devBox = new wxStaticBoxSizer(wxHORIZONTAL, &dlg, "Device");
+    // wxChoice (dropdown): wxWidgets' standard list/choice controls on MSW
+    // canNOT disable individual rows (only the whole control).  So unusable
+    // devices are NOT hidden — they appear with a "(driver unavailable)"
+    // suffix, and if the user picks one the OK handler refuses to apply it
+    // (reverts).  This is the closest stable approximation to "greyed out"
+    // without swapping in a heavyweight wxDataView/owner-draw control.
     auto* devChoice = new wxChoice(devBox->GetStaticBox(), wxID_ANY);
     for (size_t i = 0; i < devLabels.size(); ++i)
         devChoice->Append(devLabels[i]);
+    // If the persisted selection is unusable, fall back to Auto (row 0) so the
+    // dialog opens on a valid selection instead of an unusable one.
+    if (devSel >= 0 && devSel < (int)devUsable.size() && !devUsable[devSel])
+        devSel = 0;
     devChoice->SetSelection(devSel);
     devBox->Add(devChoice, 1, wxEXPAND | wxALL, 4);
     root->Add(devBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
@@ -570,6 +565,21 @@ void AppFrame::ShowSettingsDialog() {
         wxString newHotkey       = hotkeyText->GetValue();
         int zhSel = zhChoice->GetSelection();   // -1 if none
 
+        // Refuse an unusable device selection (the row is marked
+        // "(driver unavailable)").  Keep the model/mic/zh changes but don't
+        // switch the device to one whose driver can't init a SYCL backend.
+        if (newDevIdx >= 0) {
+            auto di = whisper_xpu::get_device_info(newDevIdx);
+            if (!di.usable) {
+                wxMessageBox(
+                    wxString::FromUTF8("The selected device '") + di.name +
+                    wxString::FromUTF8("' is unusable (its driver rejected "
+                        "SYCL backend init). Pick the dGPU or CPU."),
+                    "Device Unavailable", wxOK | wxICON_WARNING);
+                newDevIdx = m_deviceIndex;   // keep the old, usable device
+            }
+        }
+
         bool devChanged   = (newDevIdx != m_deviceIndex);
         bool modelChanged = (newModelPath != m_modelPath);
 
@@ -647,6 +657,19 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
                              "No Model", wxOK | wxICON_INFORMATION);
                 return;
             }
+            // Block Record while the model is still loading — same gate as
+            // Settings: the load thread isn't interruptible, and starting
+            // capture mid-load (even though it buffers) is a confusing UX.
+            // Wait for engine ready before allowing Record.
+            if (!m_scheduler->can_reload()) {
+                wxMessageBox(
+                    wxString::FromUTF8("The model is still loading — please "
+                        "wait for it to finish (status bar shows "
+                        "\xe2\x80\x9cLoading model\xe2\x80\xa6\xe2\x80\x9d) "
+                        "before starting recording."),
+                    "Still Loading", wxOK | wxICON_INFORMATION);
+                return;
+            }
             if (!m_scheduler->start(m_micIndex)) {
                 wxMessageBox(
                     "Could not open the microphone.\n\n"
@@ -686,8 +709,25 @@ void AppFrame::OnStatusBarClick(wxMouseEvent& ev) {
         wxRect r;
         sb->GetFieldRect(i, r);
         if (r.Contains(ev.GetPosition())) {
-            if (i == STATUS_SETTINGS)
-                ShowSettingsDialog();
+            if (i == STATUS_SETTINGS) {
+                // Don't open Settings while a model is loading — switching
+                // models mid-load can't be done safely (the load thread isn't
+                // interruptible), and entering Settings then would only end in a
+                // "still loading" refusal.  The status bar already shows
+                // "Loading model…"; tell the user to wait instead of opening
+                // the dialog.  (Record IS allowed during load — capture buffers
+                // in the ring and the pipeline launches when warmup finishes.)
+                if (m_scheduler && !m_scheduler->can_reload()) {
+                    wxMessageBox(
+                        wxString::FromUTF8("The model is still loading — please "
+                            "wait for it to finish (status bar shows "
+                            "\xe2\x80\x9cLoading model\xe2\x80\xa6\xe2\x80\x9d) "
+                            "before opening Settings to switch the model or device."),
+                        "Still Loading", wxOK | wxICON_INFORMATION);
+                } else {
+                    ShowSettingsDialog();
+                }
+            }
             break;
         }
     }
