@@ -92,8 +92,7 @@ model=models/ggml-large-v3-turbo-q5_0.bin
 > （问题在上游 ggml-sycl 的算子）；`q5_0` 在 CPU 和 GPU 上都正常。
 
 > **GPU 在 worker 触碰前要先预热。** SYCL 的首次内核 JIT + 每 state buffer 分配
-> 在 **load 线程**（`warmup_states`）上跑，且在 worker 发起首次 GPU 计算之前，
-> 否则 app 会 AV。
+> 先在 **load 线程**（`warmup_states`）上跑。
 
 ---
 

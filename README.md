@@ -102,8 +102,7 @@ model=models/ggml-large-v3-turbo-q5_0.bin
 
 > **The GPU must be warmed up before any worker touches it.** SYCL's
 > first-kernel JIT + per-state buffer alloc runs on the **load thread**
-> (`warmup_states`) before the worker issues its first GPU compute, or the app
-> AVs.
+> (`warmup_states`) first.
 
 ## Build from source (verified)
 
