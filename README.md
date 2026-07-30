@@ -89,12 +89,10 @@ Then set it as the default — either open Settings and pick it, or edit
 model=models/ggml-large-v3-turbo-q5_0.bin
 ```
 
-> **Avoid `q8_0` on the GPU for now.** On Intel Arc, the `q8_0` models
-> (large-v3 / turbo) produce garbage on the GPU while transcribing correctly
-> on the CPU — an upstream **whisper.cpp / ggml-sycl** issue (the `q8_0`
-> SYCL dequant/mat-mul path), not this project's code. The `q5_0` models above
-> are unaffected; use them on the GPU. (No upstream issue link found — verify
-> against the current ggml-org/whisper.cpp master before assuming it persists.)
+> **On the GPU, prefer `q5_0` over `q8_0`.** Verified: `ggml-large-v3-turbo-q8_0.bin`
+> transcribes correctly on **CPU** (172 chars, real text) but produces **empty
+> output on the Intel Arc GPU** (0 chars) — while the `q5_0` models above work
+> on both. Use `q5_0` on the GPU.
 
 ## Build from source (verified)
 
