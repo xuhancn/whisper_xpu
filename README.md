@@ -52,6 +52,48 @@ Only the **verified** build path is documented below (Ninja + oneAPI 2025.3
 on Windows). Other generators/platforms were explored but are not kept here
 because they weren't reliably green.
 
+## Models
+
+The release zip ships **only** `ggml-tiny.bin` (~77 MB) — enough to run
+out of the box, and tiny is fast on CPU. For real use you'll want a larger,
+more accurate model; download it yourself into `models/` and point Settings
+(or `whisper_xpu.ini`) at it.
+
+The `q5_0` (5-bit) quantized models are the verified, recommended set —
+they work on both CPU and the Intel GPU. Download from the official
+[whisper.cpp HuggingFace repo](https://huggingface.co/ggerganov/whisper.cpp)
+(`ggerganov/whisper.cpp`):
+
+| Model | File | Size | Verified |
+|---|---|---|---|
+| tiny | `ggml-tiny.bin` | ~77 MB | ✓ (ships in the release) |
+| medium | `ggml-medium-q5_0.bin` | ~540 MB | ✓ (CPU + GPU) |
+| large-v3 | `ggml-large-v3-q5_0.bin` | ~1.0 GB | ✓ (CPU + GPU) |
+| large-v3 turbo | `ggml-large-v3-turbo-q5_0.bin` | ~570 MB | ✓ (CPU + GPU) |
+
+Download (pick one):
+
+```powershell
+# e.g. the turbo model — faster + accurate:
+curl -L -o models/ggml-large-v3-turbo-q5_0.bin `
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin
+# or the full large-v3 (most accurate, slowest):
+curl -L -o models/ggml-large-v3-q5_0.bin `
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-q5_0.bin
+```
+
+Then set it as the default — either open Settings and pick it, or edit
+`whisper_xpu.ini`:
+
+```ini
+model=models/ggml-large-v3-turbo-q5_0.bin
+```
+
+> **Avoid the `q8_0` quantization on the GPU** for now: the `q8_0` SYCL
+> dequant/mat-mul kernel has a known issue on Intel Arc (large-v3 / turbo
+> produce garbage on the GPU while working on CPU). The `q5_0` models above
+> are unaffected — use them on the GPU.
+
 ## Build from source (verified)
 
 ### Prerequisites
@@ -59,8 +101,11 @@ because they weren't reliably green.
 - **Windows 10/11**
 - [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html)
   **2025.3** — provides the SYCL compiler (`icx`/`icpx`) and `sycl8.dll`.
-  **Do not use 2026.1**: under 2026.1 the Level Zero runtime fails to resolve
-  the first compute kernel (`No kernel named im2col_sycl<half>`). Pin 2025.3.
+  Use 2025.3 specifically: the bundled **whisper.cpp / ggml-sycl** is written
+  against the 2025.3 Level Zero + `sycl8` runtime; under oneAPI 2026.1
+  (`sycl9.dll`) the first compute kernel fails to resolve
+  (`No kernel named im2col_sycl<half>`) because ggml-sycl hasn't been ported to
+  the 2026.1 runtime yet — not a bug in oneAPI itself. Pin 2025.3 for now.
 - [Ninja](https://ninja-build.org/) 1.11+ (`winget install Ninja-build.Ninja`)
 - Visual Studio 2022 (Build Tools or IDE) — "Desktop development with C++"
 - CMake 3.22+
@@ -75,7 +120,8 @@ because they weren't reliably green.
 ### Configure + build
 
 ```powershell
-# 1. Pin oneAPI 2025.3 (the root setvars.bat would load 2026.1, which is broken).
+# 1. Pin oneAPI 2025.3 (the root setvars.bat loads 2026.1, whose sycl9.dll
+#    ggml-sycl isn't ported to yet — see Notes).
 $env:VS2022INSTALLDIR = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
 & "C:\Program Files (x86)\Intel\oneAPI\2025.3\oneapi-vars.bat"
 
@@ -150,10 +196,12 @@ Default `OFF` — dev builds skip the packaging cost.
 
 A few non-obvious behaviors and constraints worth knowing before building or running.
 
-- **oneAPI 2026.1 does not work for the GPU path.** `sycl9.dll` + the Level Zero
-  runtime fail to resolve the first compute kernel. **Pin 2025.3** (which ships
-  `sycl8.dll`). The root `setvars.bat` loads 2026.1 — use the per-version
-  `2025.3\oneapi-vars.bat`.
+- **Use oneAPI 2025.3, not 2026.1, for the GPU path.** This is a whisper.cpp /
+  ggml-sycl limitation, not an oneAPI bug: ggml-sycl is written against 2025.3's
+  `sycl8.dll` + Level Zero runtime and hasn't been ported to 2026.1's `sycl9.dll`,
+  so the first compute kernel fails to resolve (`No kernel named
+  im2col_sycl<half>`). Pin 2025.3 (which ships `sycl8.dll`). The root
+  `setvars.bat` loads 2026.1 — use the per-version `2025.3\oneapi-vars.bat`.
 - **Under `-G Ninja`, force `cl` at the top level.** CMake picks `icx` first on
   PATH after oneapi-vars; wxWidgets then aborts with `Unknown WIN32 compiler
   type`. Pass `-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl` — the whisper.cpp
