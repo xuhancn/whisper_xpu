@@ -2,10 +2,14 @@
 build-*/
 build/
 
-# Models — large binaries, not source
-models/
-*.bin
-!third_party/**/CMakeLists.txt
+# Models — large binaries, not source. The two SMALL bundled models
+# (tiny + VAD) ship in the repo so a fresh clone can run release_package;
+# everything else (medium/large q5_0, etc.) is gitignored — users download
+# those themselves.
+models/*
+!models/ggml-tiny.bin
+!models/vad_model/
+!models/vad_model/ggml-vad.bin
 
 # Runtime logs
 *.log
