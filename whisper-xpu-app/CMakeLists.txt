@@ -208,7 +208,7 @@ if(WHISPER_XPU_RELEASE)
         "device=-1\n"
         "mic=-1\n"
         "hotkey=Ctrl+Shift+R\n"
-        "zh=1\n")
+        "zh=-1\n")
     add_custom_command(TARGET release_package POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_BINARY_DIR}/whisper_xpu.ini" "${_rel_dir}/"
