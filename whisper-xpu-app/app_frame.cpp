@@ -187,6 +187,14 @@ void AppFrame::RefreshUI(const SchedulerStatus& s) {
             m_recordBtn->Enable(true);
             m_recording.store(true);
             break;
+        case SchedulerState::Draining:
+            // async_stop is draining buffered audio on a background thread.
+            // Show "Finishing…" + grey the button so the user can't Record
+            // until the drain completes (sync thread flips to Ready).
+            SetStatusText(wxString::FromUTF8("Finishing…"), STATUS_MIC);
+            m_recordBtn->SetLabel("Record");
+            m_recordBtn->Enable(false);
+            break;
         case SchedulerState::Failed:
             SetStatusText("Engine load failed", STATUS_MIC);
             m_recordBtn->SetLabel("Record");
@@ -678,14 +686,28 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
             // Block Record while the model is still loading — same gate as
             // Settings: the load thread isn't interruptible, and starting
             // capture mid-load (even though it buffers) is a confusing UX.
-            // Wait for engine ready before allowing Record.
+            // Wait for engine ready before allowing Record.  Also blocks
+            // during drain (async_stop finishing the last buffered audio).
             if (!m_scheduler->can_reload()) {
-                wxMessageBox(
-                    wxString::FromUTF8("The model is still loading — please "
-                        "wait for it to finish (status bar shows "
-                        "\xe2\x80\x9cLoading model\xe2\x80\xa6\xe2\x80\x9d) "
-                        "before starting recording."),
-                    "Still Loading", wxOK | wxICON_INFORMATION);
+                // Distinguish "still loading" from "still draining" for a
+                // clearer message.
+                auto st = m_scheduler->query_status().state;
+                if (st == SchedulerState::Draining) {
+                    wxMessageBox(
+                        wxString::FromUTF8("Still processing the previous "
+                            "recording — please wait for it to finish "
+                            "(status bar shows \xe2\x80\x9c""Finishing"
+                            "\xe2\x80\xa6\xe2\x80\x9d"") before starting a "
+                            "new recording."),
+                        "Still Processing", wxOK | wxICON_INFORMATION);
+                } else {
+                    wxMessageBox(
+                        wxString::FromUTF8("The model is still loading — "
+                            "please wait for it to finish (status bar shows "
+                            "\xe2\x80\x9cLoading model\xe2\x80\xa6"
+                            "\xe2\x80\x9d) before starting recording."),
+                        "Still Loading", wxOK | wxICON_INFORMATION);
+                }
                 return;
             }
             if (!m_scheduler->start(m_micIndex)) {
@@ -702,10 +724,12 @@ void AppFrame::OnToggleRecord(wxCommandEvent& WXUNUSED(event)) {
             // The sync thread's next poll (≤100ms) flips the button to "Stop"
             // and the status to Recording/Loading-as-appropriate.
         } else {
-            // ── Stop ──  The engine survives stop() for the next Record.
-            if (m_scheduler) m_scheduler->stop();
+            // ── Stop ──  Async: set m_draining, run stop() on a bg thread.
+            // The UI shows "Finishing…" immediately (sync thread polls
+            // query_status → Draining); when the drain completes the sync
+            // thread flips back to Ready.  The GUI thread never blocks.
+            if (m_scheduler) m_scheduler->async_stop();
             m_recording.store(false);
-            // The sync thread flips the button back to "Record".
         }
     });
 }
@@ -757,10 +781,16 @@ void AppFrame::OnClose(wxCloseEvent& event) {
     // torn down.  (~AppFrame also does this, but OnClose runs first.)
     m_stopSync.store(true);
     if (m_syncThread.joinable()) m_syncThread.join();
-    // Stop any recording; then drop the scheduler (its dtor aborts + joins the
-    // load thread and frees the engine).
-    if (m_recording && m_scheduler)
-        m_scheduler->stop();
+    // Stop any recording.  If async_stop is draining (state == Draining),
+    // the background thread is already running stop() — calling stop() again
+    // from here would race/double-join.  In that case let the scheduler's
+    // dtor join the stop thread (it checks m_stopThread.joinable).  If
+    // recording but NOT draining (user didn't click Stop), do a sync stop.
+    if (m_recording && m_scheduler) {
+        auto st = m_scheduler->query_status().state;
+        if (st != SchedulerState::Draining)
+            m_scheduler->stop();   // synchronous — blocks briefly on close
+    }
     m_scheduler.reset();
     event.Skip();
 }

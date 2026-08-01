@@ -140,7 +140,17 @@ TranscriptionScheduler::TranscriptionScheduler(TextCallback on_text,
 }
 
 TranscriptionScheduler::~TranscriptionScheduler() {
-    if (m_recording) stop();
+    // If an async_stop drain thread is running, join it first — it owns the
+    // pipeline thread joins (stop() joins windower/workers/merger) and must
+    // finish before we touch those threads below.  If recording (not async-
+    // stopped), do a synchronous stop.
+    if (m_stopThread.joinable()) {
+        sched_log("[Scheduler] dtor: joining async_stop drain thread...");
+        m_stopThread.join();
+        sched_log("[Scheduler] dtor: drain thread joined");
+    } else if (m_recording) {
+        stop();
+    }
     // Join the background load thread if still running (e.g. the app closed
     // during the startup load).  We do NOT abort it — there's no abort flag
     // anymore (the UI blocks reload during Loading, so warmup is never
@@ -527,6 +537,24 @@ void TranscriptionScheduler::launch_threads_if_ready() {
 
 void TranscriptionScheduler::feed_audio(const float* samples, size_t count) {
     m_ring.push(samples, count);
+}
+
+void TranscriptionScheduler::async_stop() {
+    // Non-blocking stop: set m_draining immediately (so query_status reports
+    // Draining on the next sync-thread poll — UI shows "Finishing…"), then run
+    // stop() on a background thread.  stop() does the two-phase drain (windower
+    // drains ring, workers finish in-flight, merger emits all) + cleanup, then
+    // clears m_draining.  The GUI thread returns immediately — never blocks.
+    if (!m_recording.load() && !m_draining.load()) return;
+    m_draining.store(true);
+    // Join any prior async_stop thread (shouldn't happen — stop is one-shot —
+    // but be safe so the std::thread assignment doesn't terminate on joinable).
+    if (m_stopThread.joinable()) m_stopThread.join();
+    m_stopThread = std::thread([this]() {
+        stop();
+        m_draining.store(false);
+    });
+    sched_log("[Scheduler] async_stop: drain launched on background thread");
 }
 
 void TranscriptionScheduler::stop() {
@@ -922,6 +950,10 @@ SchedulerStatus TranscriptionScheduler::query_status() const {
 
     if (m_recording.load()) {
         s.state = SchedulerState::Recording;
+    } else if (m_draining.load()) {
+        // Stop clicked — async_stop is draining buffered audio + in-flight
+        // transcribe on a background thread.  UI shows "Finishing…".
+        s.state = SchedulerState::Draining;
     } else if (m_loading.load() && !m_engineReady.load() && !m_engineFailed.load()) {
         // load_loop is running and hasn't reached ready/failed yet.
         s.state = SchedulerState::Loading;
