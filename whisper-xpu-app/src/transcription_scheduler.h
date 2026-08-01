@@ -207,6 +207,7 @@ private:
         int             index;               // chunk index (0-based)
         int64_t         pcm_start_global_ms; // global time of pcm[0]
         std::vector<float> pcm;              // 6s window (1s tail + 5s new)
+        std::string     prompt;              // prev emitted text → whisper initial_prompt (context stitching)
     };
     // Result handed workers → merger (ChunkResult comes from engine.h).
     struct ChunkDone {
@@ -220,6 +221,14 @@ private:
     void merger_loop();
     void load_loop();                          // background: Engine ctor + warmup
     static void join_thread(std::thread& t);
+
+    // Boundary post-processing: if the last N words of prevTail equal the
+    // first N words of curHead (N up to ~3), drop the head copy — a word
+    // straddling a 5s window seam can otherwise be transcribed twice (the
+    // midpoint dedup catches most, this is the cleanup net).  Applied at
+    // chunk seams only, not within a chunk.
+    static std::string trim_overlap_repeat(const std::string& prevTail,
+                                           const std::string& curHead);
 
     // Active engine: the owned m_engine (app path) or the borrowed
     // m_sharedEngine (test path).  Exactly one is set at a time.  Returns
@@ -307,6 +316,14 @@ private:
     // Merger ordered state.
     std::map<int, ChunkDone>    m_pending;   // index → result (awaiting in-order drain)
     int                         m_nextEmit = 0;
+    // Context + paragraph state (merger owns; under m_mergerMutex).
+    // m_lastEmittedText: running transcript tail (capped ~200 chars) fed as
+    //   initial_prompt to the next window via WindowJob::prompt (context
+    //   stitching).  Snapshot is read by the windower (best-effort).
+    // m_lastSegGlobalEndMs: global end-ms of the last KEPT segment, for gap-
+    //   based paragraph detection (gap<1s same para, >2s new para, 1-2s soft).
+    std::string                 m_lastEmittedText;
+    int64_t                     m_lastSegGlobalEndMs = -1;
 
     std::thread                 m_windowerThread;
     std::vector<std::thread>    m_workerThreads;

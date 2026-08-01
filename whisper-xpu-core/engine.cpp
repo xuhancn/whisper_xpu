@@ -292,7 +292,8 @@ void Engine::free_state(whisper_state* st) {
 ChunkResult Engine::transcribe_window_with_state(whisper_state* st, int n_threads,
                                                  std::string& detected_language,
                                                  const float* pcm, int n_samples,
-                                                 const std::atomic<bool>* abort_flag) {
+                                                 const std::atomic<bool>* abort_flag,
+                                                 const std::string* initial_prompt) {
     ChunkResult result;
     if (!pimpl_->ctx || !st || n_samples <= 0) return result;
 
@@ -304,7 +305,18 @@ ChunkResult Engine::transcribe_window_with_state(whisper_state* st, int n_thread
     wp.n_threads = n_threads > 0 ? n_threads : pimpl_->n_threads;
     // Multi-segment + timestamps: REQUIRED for overlap merging (the merger
     // keys on each segment's midpoint).
-    wp.single_segment=false; wp.no_timestamps=false; wp.no_context=true;
+    wp.single_segment=false; wp.no_timestamps=false;
+    // Context stitching: feed the previous emitted text as initial_prompt so
+    // the decoder conditions on it (better continuity across windows, fewer
+    // boundary repeats).  When a prompt is given, no_context=false lets
+    // whisper also use its own KV carry; with no prompt (headless test path),
+    // no_context=true preserves the prior behavior.
+    const bool has_prompt = initial_prompt && !initial_prompt->empty();
+    wp.no_context = !has_prompt;
+    if (has_prompt) {
+        wp.initial_prompt = initial_prompt->c_str();
+        wp.carry_initial_prompt = false;  // prepend once, not every decode window
+    }
 
     // Per-worker language cache (caller-owned): first window auto-detects and
     // pins; later windows skip the detection encoder pass.
