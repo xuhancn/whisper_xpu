@@ -343,7 +343,8 @@ private:
     std::atomic<long>          m_totalChars{0};        // for query_status
 
     std::atomic<bool>           m_recording{false};
-    std::atomic<bool>           m_stopping{false};  // aborts in-flight whisper_full + exits all loops
+    std::atomic<bool>           m_stopping{false};  // genuine shutdown: aborts in-flight whisper_full + exits all loops (dtor/reload)
+    std::atomic<bool>           m_draining{false};  // stop() drain phase: windower drains remaining ring, workers finish in-flight, merger flushes — do NOT abort in-flight transcribe
 
     // Introspection counters (populated across threads; read via stats()).
     std::atomic<int>  m_dispatched{0};

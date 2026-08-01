@@ -399,6 +399,7 @@ bool TranscriptionScheduler::start(int micIndex) {
     if (m_recording) return true;
 
     m_stopping = false;
+    m_draining = false;
     m_nextEmit = 0;
     m_pending.clear();
     m_workerQueue.clear();
@@ -446,6 +447,7 @@ bool TranscriptionScheduler::start_no_capture(whisper_xpu::Engine& sharedEngine)
     m_sharedEngine = &sharedEngine;
 
     m_stopping = false;
+    m_draining = false;
     m_nextEmit = 0;
     m_pending.clear();
     m_workerQueue.clear();
@@ -531,20 +533,43 @@ void TranscriptionScheduler::stop() {
     if (!m_recording) return;
 
     int t0 = now_ms();
-    sched_log("[Scheduler] stop");
-    m_recording = false;
-    m_stopping  = true;   // aborts in-flight transcribe_window + exits all loops
+    sched_log("[Scheduler] stop (drain phase — finish in-flight + buffered)");
 
-    m_workerCv.notify_all();   // wake workers blocked on the queue
-    m_mergerCv.notify_all();   // wake merger
+    // Phase 1 — DRAIN: stop capturing, but let the pipeline finish
+    // transcribing everything already buffered (ring + worker queue +
+    // in-flight windows).  Set m_draining (not m_stopping) so:
+    //  - windower drains the remaining ring into a final partial window
+    //    (instead of just exiting and losing the last 2-3s of speech)
+    //  - workers finish in-flight transcribe_window to completion (nullptr
+    //    abort flag — don't abort mid-compute) and keep pulling queued windows
+    //  - merger keeps emitting in-order until the queue is drained
+    m_recording = false;   // windower stops blocking for NEW 5s blocks
+    m_draining  = true;    // drain phase: finish buffered, don't abort
+    m_workerCv.notify_all();
+    m_mergerCv.notify_all();
 
-    // Join all threads before freeing the per-worker states so none touch
-    // `this` / m_states / the borrowed Engine after stop.  In-flight
-    // transcribe_window_with_state aborts in ms via the abort flag.
+    // Wait for the windower to exit (it drains the ring + emits the final
+    // partial window, then exits when m_recording is false).
     join_thread(m_windowerThread);
+
+    // Now the worker queue has all remaining windows (including the final
+    // partial one).  Wake any workers blocked on the cv so they pull + finish.
+    m_workerCv.notify_all();
+
+    // Wait for all workers to drain the queue + finish their in-flight
+    // transcribe (they exit when draining && queue empty).
     for (auto& t : m_workerThreads) join_thread(t);
-    join_thread(m_mergerThread);
     m_workerThreads.clear();
+
+    // All windows are transcribed + posted to the merger queue.  Wake the
+    // merger so it drains the last in-order chunks.
+    m_mergerCv.notify_all();
+    join_thread(m_mergerThread);
+
+    // Phase 2 — SHUTDOWN: everything is drained + emitted.  Now the hard
+    // stop flag (for any straggler or the dtor path) + cleanup.
+    m_draining  = false;
+    m_stopping  = false;   // already drained; no abort needed
 
     if (m_capture) {
         m_capture->stop();
@@ -594,7 +619,21 @@ void TranscriptionScheduler::windower_loop() {
             got += n;
             if (n == 0) std::this_thread::sleep_for(20ms);
         }
-        if (!m_recording) break;
+        if (!m_recording) {
+            // Recording stopped mid-window — drain any remaining ring audio
+            // into a final (shorter) window so the last 2-3s of speech isn't
+            // lost.  Only skip if there's nothing left at all.
+            size_t rem = m_ring.pull(newBuf.data() + got, NEW_SAMPLES - got);
+            got += rem;
+            if (got == 0) break;   // nothing buffered — clean exit
+            // fall through with a partial `got` (< NEW_SAMPLES): pad the
+            // remainder of newBuf with silence so the window is uniform.
+            // (whisper handles a short final window fine; the merger's
+            // midpoint dedup still works on whatever segments it emits.)
+            for (size_t i = got; i < NEW_SAMPLES; ++i) newBuf[i] = 0.0f;
+            sched_log("[Scheduler] draining final partial window: %zu new samples (+tail)", got);
+            // fall through to emit this last window below, then exit the loop.
+        }
 
         // 6s window = [prevTail (1s) || new (5s)].
         std::vector<float> pcm;
@@ -653,18 +692,26 @@ void TranscriptionScheduler::worker_loop(int workerId) {
         {
             std::unique_lock<std::mutex> lk(m_workerMutex);
             m_workerCv.wait(lk, [this] {
-                return m_stopping.load() || !m_workerQueue.empty();
+                return m_stopping.load() || m_draining.load() || !m_workerQueue.empty();
             });
-            if (m_stopping.load() && m_workerQueue.empty()) break;
+            // Exit when there's genuinely nothing left: shutdown/drain AND
+            // the queue is drained.  During the drain phase (m_draining, not
+            // m_stopping) we keep pulling queued windows to transcribe them.
+            if ((m_stopping.load() || m_draining.load()) && m_workerQueue.empty()) break;
             if (m_workerQueue.empty()) continue;   // spurious wake
             job = std::move(m_workerQueue.front());
             m_workerQueue.pop_front();
         }
         m_workersUsed.fetch_or(1 << workerId);
 
+        // Abort flag: only on genuine shutdown (m_stopping).  During the drain
+        // phase (m_draining) pass nullptr so in-flight transcribe_window runs
+        // to completion — we want the last few seconds of buffered speech
+        // transcribed, not aborted mid-compute.
+        const std::atomic<bool>* abort = m_stopping.load() ? &m_stopping : nullptr;
         auto r = engine()->transcribe_window_with_state(
             m_states[workerId], m_nThreadsPerWorker, m_workerLang[workerId],
-            job.pcm.data(), (int)job.pcm.size(), &m_stopping,
+            job.pcm.data(), (int)job.pcm.size(), abort,
             job.prompt.empty() ? nullptr : &job.prompt);
         const size_t segs  = r.segments.size();
         const double pms   = r.processing_time_ms;
@@ -702,9 +749,18 @@ void TranscriptionScheduler::merger_loop() {
         {
             std::unique_lock<std::mutex> lk(m_mergerMutex);
             m_mergerCv.wait(lk, [this] {
-                return m_stopping.load() || !m_mergerQueue.empty();
+                return m_stopping.load() || m_draining.load() || !m_mergerQueue.empty();
             });
+            // Exit only on genuine shutdown (m_stopping) with everything
+            // drained.  During the drain phase (m_draining) we keep pulling
+            // + emitting in-order until the workers finish + queue is empty.
+            // Exit on: genuine shutdown (m_stopping) OR drain done — m_draining
+            // AND all dispatched windows completed (m_completed==m_dispatched,
+            // so no more chunks will arrive) AND merger queue drained.
             if (m_stopping.load() && m_mergerQueue.empty()) break;
+            if (m_draining.load() &&
+                m_completed.load() >= m_dispatched.load() &&
+                m_mergerQueue.empty()) break;
             if (m_mergerQueue.empty()) continue;
             done = std::move(m_mergerQueue.front());
             m_mergerQueue.pop_front();
