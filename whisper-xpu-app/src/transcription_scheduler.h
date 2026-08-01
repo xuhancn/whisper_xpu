@@ -36,6 +36,7 @@ enum class SchedulerState {
     Loading,     // bg load_loop building the Engine + warming up (startup/reload)
     Ready,       // Engine ready, not recording; Record is instant from here
     Recording,   // capture + pipeline threads running
+    Draining,    // Stop clicked — draining buffered audio + in-flight transcribe (async_stop on a bg thread)
     Failed,      // last load/setup failed (e.g. bad model path / SYCL error)
 };
 struct SchedulerStatus {
@@ -185,6 +186,14 @@ public:
     // threads, free the 4 per-worker states.  The owned Engine survives.
     void stop();
 
+    // Async stop: sets m_draining immediately (UI shows "Finishing…" via
+    // query_status), runs stop() on a background thread so the GUI never
+    // blocks during the drain.  The drain transcribes all buffered audio
+    // + in-flight windows before shutting down.  The UI's sync thread polls
+    // query_status() and sees Draining → Ready when done.  Record/Settings
+    // are blocked while draining (can_reload() checks !m_draining).
+    void async_stop();
+
     // ── Queries (pure data — the UI's sync thread polls this) ──
 
     bool is_recording() const { return m_recording.load(); }
@@ -194,7 +203,7 @@ public:
     // (m_engineReady covers the engine-built case; m_isLoading covers the
     // narrow window where warmup finished but reload hasn't reset it yet, and
     // vice-versa.)  The Settings OK handler blocks reload unless this is true.
-    bool can_reload() const { return m_engineReady.load() && !m_isLoading.load(); }
+    bool can_reload() const { return m_engineReady.load() && !m_isLoading.load() && !m_draining.load(); }
     // Snapshot of state + model/device names + gpu_ready/recording/total_chars.
     SchedulerStatus query_status() const;
 
@@ -334,6 +343,7 @@ private:
     // aborted/interrupted — the UI blocks reload during Loading, so warmup
     // always runs to completion (no abort flag, no generation counter).
     std::thread                 m_loadThread;
+    std::thread                 m_stopThread;             // async_stop's drain thread (joined in dtor)
     std::atomic<bool>           m_loading{false};      // load_loop is running (for query_status + can_reload)
     std::atomic<bool>           m_isLoading{false};    // reload/start gate — true while a load is in flight
     std::mutex                  m_launchMutex;          // guards launch_threads_if_ready + the flags below
