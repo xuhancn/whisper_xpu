@@ -37,6 +37,67 @@ void TranscriptionScheduler::join_thread(std::thread& t) {
     if (t.joinable()) t.join();
 }
 
+// Boundary-repeat trim: at a 5s-window seam, a word straddling the boundary
+// can be transcribed in BOTH windows' overlap region.  The midpoint dedup
+// catches most; this is the cleanup net.  If the last N words (N up to 3) of
+// prevTail equal the first N words of curHead, drop the head copy.
+// Whitespace-split, ASCII-fold; returns curHead with the repeated run removed.
+std::string TranscriptionScheduler::trim_overlap_repeat(const std::string& prevTail,
+                                                        const std::string& curHead) {
+    if (prevTail.empty() || curHead.empty()) return curHead;
+    // split prevTail into words (last up to 3, in order)
+    auto words = [](const std::string& s) {
+        std::vector<std::string> v;
+        size_t i = 0;
+        while (i < s.size()) {
+            while (i < s.size() && (s[i] == ' ' || s[i] == '\n')) i++;
+            if (i >= s.size()) break;
+            size_t j = i;
+            while (j < s.size() && s[j] != ' ' && s[j] != '\n') j++;
+            v.emplace_back(s.substr(i, j - i));
+            i = j;
+        }
+        return v;
+    };
+    auto pv = words(prevTail);
+    auto cv = words(curHead);
+    if (pv.empty() || cv.empty()) return curHead;
+    // try longest match first: up to 3 trailing words
+    int match = 0;
+    for (int n = (int)std::min<size_t>({pv.size(), cv.size(), 3}); n >= 1; --n) {
+        bool ok = true;
+        for (int k = 0; k < n; ++k) {
+            if (pv[pv.size() - n + k] != cv[k]) { ok = false; break; }
+        }
+        if (ok) { match = n; break; }
+    }
+    if (match == 0) return curHead;
+    // drop the first `match` words from curHead, preserving the leading
+    // whitespace + remaining words
+    std::string out;
+    size_t i = 0;
+    int skipped = 0;
+    while (i < curHead.size()) {
+        // copy leading whitespace through skipped==match
+        if (skipped < match) {
+            while (i < curHead.size() && (curHead[i] == ' ' || curHead[i] == '\n')) {
+                out.push_back(curHead[i]); i++;
+            }
+            if (i >= curHead.size() || curHead[i] == ' ' || curHead[i] == '\n') { skipped++; continue; }
+            // skip the word
+            while (i < curHead.size() && curHead[i] != ' ' && curHead[i] != '\n') i++;
+            skipped++;
+        } else {
+            out.append(curHead, i, std::string::npos);
+            break;
+        }
+    }
+    // strip a lone leading space left after dropping
+    size_t sp = out.find_first_not_of(' ');
+    if (sp != std::string::npos) out.erase(0, sp);
+    return out;
+}
+
 // Static PortAudio callback → pushes to ring buffer
 void TranscriptionScheduler::on_audio_cb(TranscriptionScheduler* self,
                                          const float* samples, size_t count) {
@@ -344,6 +405,8 @@ bool TranscriptionScheduler::start(int micIndex) {
     m_mergerQueue.clear();
     m_ring.clear();
     m_dispatched = m_completed = m_workersUsed = 0;
+    m_lastEmittedText.clear();       // reset context tail (no carry from prev recording)
+    m_lastSegGlobalEndMs = -1;       // first segment → no gap, same paragraph
     m_segsKept = m_segsDropped = 0; m_lastStopMs = 0;
     m_totalChars.store(0);   // per-session char count (stats().total_chars + query_status)
 
@@ -389,6 +452,8 @@ bool TranscriptionScheduler::start_no_capture(whisper_xpu::Engine& sharedEngine)
     m_mergerQueue.clear();
     m_ring.clear();
     m_dispatched = m_completed = m_workersUsed = 0;
+    m_lastEmittedText.clear();       // reset context tail (no carry from prev recording)
+    m_lastSegGlobalEndMs = -1;       // first segment → no gap, same paragraph
     m_segsKept = m_segsDropped = 0; m_lastStopMs = 0;
     m_totalChars.store(0);
 
@@ -548,7 +613,18 @@ void TranscriptionScheduler::windower_loop() {
         size_t queued;
         {
             std::lock_guard<std::mutex> lk(m_workerMutex);
-            m_workerQueue.push_back(WindowJob{chunkIndex, pcm_start_global_ms, std::move(pcm)});
+            // Context stitching: snapshot the merger's last emitted text as
+            // the initial_prompt for this window.  Best-effort — the windower
+            // is ~5s behind real-time, so by now the merger has usually
+            // emitted chunk N-1; if not, the prompt is just empty (degraded,
+            // safe).  Read under the merger mutex so the std::string read
+            // can't tear.
+            std::string prompt;
+            {
+                std::lock_guard<std::mutex> mlk(m_mergerMutex);
+                prompt = m_lastEmittedText;
+            }
+            m_workerQueue.push_back(WindowJob{chunkIndex, pcm_start_global_ms, std::move(pcm), std::move(prompt)});
             queued = m_workerQueue.size();
         }
         m_workerCv.notify_one();
@@ -588,7 +664,8 @@ void TranscriptionScheduler::worker_loop(int workerId) {
 
         auto r = engine()->transcribe_window_with_state(
             m_states[workerId], m_nThreadsPerWorker, m_workerLang[workerId],
-            job.pcm.data(), (int)job.pcm.size(), &m_stopping);
+            job.pcm.data(), (int)job.pcm.size(), &m_stopping,
+            job.prompt.empty() ? nullptr : &job.prompt);
         const size_t segs  = r.segments.size();
         const double pms   = r.processing_time_ms;
         const bool   aborted = r.aborted;
@@ -658,6 +735,11 @@ void TranscriptionScheduler::merger_loop() {
             // lands in the core band [K*5000+250, K*5000+4750]ms.  The 0.25s
             // guards at each 5s boundary drop the overlap region shared with
             // the neighbour window ⇒ no word emitted twice, no word lost.
+            // On top of the dedup: gap-based paragraph breaks — a gap >2s
+            // between consecutive KEPT segments injects "\n\n" inline (live
+            // streaming stays; paragraphs appear at pauses).  And the seam
+            // between this chunk's first kept seg and the prev chunk's tail
+            // is run through trim_overlap_repeat (drop a word caught twice).
             const int idx = c.index;
             const int64_t kStart = (int64_t)idx * CADENCE_MS;
             const int64_t lo = kStart + CORE_GUARD_MS;
@@ -665,6 +747,7 @@ void TranscriptionScheduler::merger_loop() {
 
             std::string text;
             int kept = 0;
+            bool firstKeptInChunk = true;
             for (const auto& seg : c.result.segments) {
                 const int64_t mid = c.pcm_start_global_ms + (seg.t0_ms + seg.t1_ms) / 2;
                 const bool inBand = (mid >= lo && mid <= hi);
@@ -679,10 +762,53 @@ void TranscriptionScheduler::merger_loop() {
                     continue;
                 }
                 if (t.empty()) continue;
+
+                // Gap-based paragraph break vs the previous KEPT segment
+                // (across chunks too — m_lastSegGlobalEndMs carries over).
+                const int64_t gStart = c.pcm_start_global_ms + seg.t0_ms;
+                if (m_lastSegGlobalEndMs >= 0) {
+                    const int64_t gap = gStart - m_lastSegGlobalEndMs;
+                    if (gap > 2000) {
+                        // new paragraph — inject a blank line before this seg
+                        if (!text.empty() && text.back() == ' ') text.pop_back();
+                        text += "\n\n";
+                    }
+                }
+                // Boundary-repeat trim at the chunk seam: if this is the
+                // first kept seg of the chunk and the prev chunk's tail +
+                // this seg's head share a repeated word run, drop the head.
+                if (firstKeptInChunk) {
+                    t = trim_overlap_repeat(m_lastEmittedText, t);
+                }
+                firstKeptInChunk = false;
+
                 text += t;
                 text += ' ';
                 ++kept;
                 m_segsKept.fetch_add(1);
+                // Advance the running segment end + prompt tail (under the
+                // merger mutex — the windower snapshots m_lastEmittedText).
+                {
+                    std::lock_guard<std::mutex> mlk(m_mergerMutex);
+                    m_lastSegGlobalEndMs = c.pcm_start_global_ms + seg.t1_ms;
+                    // Append to the prompt tail, capped ~200 chars.
+                    m_lastEmittedText += t;
+                    m_lastEmittedText += ' ';
+                    if (m_lastEmittedText.size() > 200) {
+                        // keep the LAST 200 chars (drop from the front, on a
+                        // UTF-8 char boundary so we don't split a codepoint)
+                        size_t cut = m_lastEmittedText.size() - 200;
+                        // advance past any partial UTF-8 continuation byte
+                        while (cut < m_lastEmittedText.size() &&
+                               (m_lastEmittedText[cut] & 0xC0) == 0x80) cut++;
+                        // advance past the start of the next codepoint
+                        if (cut < m_lastEmittedText.size() &&
+                            (m_lastEmittedText[cut] & 0xC0) == 0xC0) {
+                            // already at a lead byte; good
+                        }
+                        m_lastEmittedText.erase(0, cut);
+                    }
+                }
             }
             if (!text.empty() && text.back() == ' ') text.pop_back();
 

@@ -126,10 +126,18 @@ public:
     // no_timestamps=false) — required for the merger's overlap dedup by
     // midpoint.  abort_flag aborts mid-computation (polled before each ggml
     // op + encoder_begin gate), same wiring as transcribe_chunk.
+    //
+    // initial_prompt: when non-null + non-empty, fed to whisper as
+    // `whisper_full_params::initial_prompt` with no_context=false, so the
+    // decoder conditions on the previous emitted text → better continuity
+    // across windows + fewer boundary repeats.  The caller (scheduler) keeps
+    // the running transcript tail (~200 chars) and passes it here.  Null/
+    // empty ⇒ no_context=true (current behavior, for the headless test path).
     ChunkResult transcribe_window_with_state(whisper_state* st, int n_threads,
                                              std::string& detected_language,
                                              const float* pcm, int n_samples,
-                                             const std::atomic<bool>* abort_flag = nullptr);
+                                             const std::atomic<bool>* abort_flag = nullptr,
+                                             const std::string* initial_prompt = nullptr);
 
     BenchmarkResult benchmark(const std::string& audio_path, const VadConfig& vad);
 
