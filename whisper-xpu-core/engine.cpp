@@ -143,18 +143,22 @@ Engine::Engine(const std::string& path, int device_id, int n_threads) : pimpl_(s
     // flash_attn is DISABLED on the SYCL GPU path.  whisper.cpp's SYCL
     // flash-attention kernel is a known-fragile path on Intel Arc (flash_attn
     // ON has been reported to produce wrong output for large-v3/turbo).  It is
-    // NOT the root cause of the q8_0-gibberish bug below (verified by toggling
+    // NOT the root cause of the q8_0-gibberish bug (verified by toggling
     // it off — turbo q8_0 still fails), but OFF is the safer default on SYCL
     // and does not regress tiny (F16 still transcribes correctly, 7/7, ~18ms
     // stop).  Leaving it off until GGML_SYCL_F16 is enabled and validated.
     //
-    // SEPARATE known bug (NOT fixed here): the q8_0 turbo/large-v3 model
-    // (ftype=7) produces GARBAGE on this SYCL GPU build — ref transcribe_file
-    // → "  ." (5 chars) vs CPU 877 chars, all segments dropped by the merger.
-    // q5_0 turbo (ftype=8) and tiny F16 (ftype=1) WORK on the same GPU.  This
-    // isolates it to the ggml-sycl q8_0 dequant/mmv kernel for n_audio_state
-    // =1024 tensors on Arc A770M / driver 1.15.38308 / oneAPI 2025.3.  Fixing
-    // requires a ggml-sycl kernel patch or rebuild, not a config change.
+    // q8_0 on GPU: the ggml-sycl "reorder" optimization (GGML_SYCL_ENABLE_OPT)
+    // re-packs q8_0 weight blocks into a split qs+d layout for better Intel
+    // GPU memory access, then dequantizes via dequantize_block_q8_0_reorder.
+    // That reorder+dequantize path is BROKEN on this Arc/driver combo — q8_0
+    // models produce empty/garbage output.  q5_0 (which does NOT use the
+    // reorder path) works fine.  Disabling GGML_SYCL_ENABLE_OPT fixes q8_0
+    // but costs ~15% throughput on all quant types.  So instead, disable the
+    // reorder only for q8_0 by removing GGML_TYPE_Q8_0 from the three
+    // supports_reorder_* lists in the whisper.cpp submodule.  This keeps the
+    // reorder optimization for q4_0/q4_K/etc (which work) while falling q8_0
+    // back to the normal dequantize path.
     // WORKAROUND: use the q5_0 turbo model on GPU (models/ggml-large-v3-turbo-q5_0.bin).
     cp.flash_attn = false;
     pimpl_->ctx = whisper_init_from_file_with_params(path.c_str(), cp);

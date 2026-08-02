@@ -1,0 +1,160 @@
+// Standalone test for k_get_rows_q5_K_reorder. Host golden = dequantize_row_q5_K (ggml-quants.c).
+#include <sycl/sycl.hpp>
+#include <cstdio>
+#include <cmath>
+#include <vector>
+#include <cstdint>
+#include <cstring>
+
+constexpr int QK_K = 256;
+constexpr int K_SCALE_SIZE = 12;
+static float h2f(sycl::half h) { return (float)h; }
+
+struct block_q5_K {
+    sycl::half2 dm;  // (d, dmin)
+    uint8_t scales[K_SCALE_SIZE];
+    uint8_t qh[QK_K/8];
+    uint8_t qs[QK_K/2];
+};
+
+static inline void get_scale_min_k4(int j, const uint8_t* q, uint8_t& d, uint8_t& m) {
+    if (j < 4) { d = q[j] & 63; m = q[j+4] & 63; }
+    else { d = (q[j+4] & 0xF) | ((q[j-4] >> 6) << 4); m = (q[j+4] >> 4) | ((q[j] >> 6) << 4); }
+}
+
+// host golden (ggml-quants.c)
+static void dequantize_row_q5_K_host(const block_q5_K* x, float* y, int k) {
+    const int nb = k / QK_K;
+    for (int i = 0; i < nb; i++) {
+        const uint8_t* ql = x[i].qs;
+        const uint8_t* qh = x[i].qh;
+        const float d = h2f(x[i].dm.x());
+        const float min = h2f(x[i].dm.y());
+        int is = 0;
+        uint8_t sc, m;
+        uint8_t u1 = 1, u2 = 2;
+        for (int j = 0; j < QK_K; j += 64) {
+            get_scale_min_k4(is+0, x[i].scales, sc, m); float d1 = d*sc, m1 = min*m;
+            get_scale_min_k4(is+1, x[i].scales, sc, m); float d2 = d*sc, m2 = min*m;
+            for (int l = 0; l < 32; ++l) *y++ = d1*((ql[l]&0xF) + (qh[l]&u1 ? 16 : 0)) - m1;
+            for (int l = 0; l < 32; ++l) *y++ = d2*((ql[l]>>4) + (qh[l]&u2 ? 16 : 0)) - m2;
+            ql += 32; is += 2; u1 <<= 2; u2 <<= 2;
+        }
+    }
+}
+
+// reorder: [qs|qh|scales|dm]
+void reorder_q5_K(const block_q5_K* src, uint8_t* dst, int nblocks) {
+    uint8_t* qs_region = dst;
+    uint8_t* qh_region = qs_region + (size_t)nblocks*(QK_K/2);
+    uint8_t* scales_region = qh_region + (size_t)nblocks*(QK_K/8);
+    uint8_t* dm_region = scales_region + (size_t)nblocks*K_SCALE_SIZE;
+    for (int i = 0; i < nblocks; i++) {
+        memcpy(qs_region + (size_t)i*(QK_K/2), src[i].qs, QK_K/2);
+        memcpy(qh_region + (size_t)i*(QK_K/8), src[i].qh, QK_K/8);
+        memcpy(scales_region + (size_t)i*K_SCALE_SIZE, src[i].scales, K_SCALE_SIZE);
+        *(sycl::half2*)(dm_region + (size_t)i*sizeof(sycl::half2)) = src[i].dm;
+    }
+}
+
+// kernel (from getrows.cpp), 64 threads/group
+void k_get_rows_q5_K_reorder(const void* src0, const int32_t* src1, float* dst,
+        int ne00, int ne01, int ne12,
+        size_t s1, size_t nb02, size_t nb03, size_t s10, size_t s11, size_t s12,
+        uint8_t* scales_local, const sycl::nd_item<3>& item) {
+    const int64_t ib_row = item.get_group(2);
+    const int64_t i10    = item.get_group(1);
+    const int64_t tid    = item.get_local_id(2);
+    const int64_t il = tid / 16;
+    const int64_t ir = tid % 16;
+    const int64_t is = 2*il;
+    const int64_t i11 = i10 / ne12;
+    const int64_t i12 = i10 % ne12;
+    const int64_t i01 = src1[i10*s10 + i11*s11 + i12*s12];
+    float* dst_row = dst + i10*s1;
+    float* y = dst_row + ib_row*QK_K + 64*il + 2*ir;
+    const uint8_t* base = (const uint8_t*)src0 + i11*nb02 + i12*nb03;
+    const int nblocks_per_row = ne00 / QK_K;
+    const int total_nblocks = ne01 * nblocks_per_row;
+    const int gblock = i01*nblocks_per_row + ib_row;
+    const size_t qs_offset     = (size_t)gblock*(QK_K/2);
+    const size_t qh_offset     = (size_t)total_nblocks*(QK_K/2) + (size_t)gblock*(QK_K/8);
+    const size_t scales_offset = (size_t)total_nblocks*(QK_K/2) + (size_t)total_nblocks*(QK_K/8) + (size_t)gblock*K_SCALE_SIZE;
+    const size_t dm_offset     = (size_t)total_nblocks*(QK_K/2) + (size_t)total_nblocks*(QK_K/8) + (size_t)total_nblocks*K_SCALE_SIZE + (size_t)gblock*sizeof(sycl::half2);
+    const uint8_t* qs_ptr = base + qs_offset;
+    const uint8_t* qh_ptr = base + qh_offset;
+    const uint8_t* scales_ptr = base + scales_offset;
+    const sycl::half2 dm_values = *(const sycl::half2*)(base + dm_offset);
+    const float dall = dm_values.x();
+    const float dmin = dm_values.y();
+    const uint8_t* ql = qs_ptr + 32*il + 2*ir;
+    const uint8_t* qh = qh_ptr + 2*ir;
+    if (tid < K_SCALE_SIZE) scales_local[tid] = scales_ptr[tid];
+    item.barrier(sycl::access::fence_space::local_space);
+    uint8_t sc, m;
+    get_scale_min_k4(is+0, scales_local, sc, m); float d1 = dall*sc, m1 = dmin*m;
+    get_scale_min_k4(is+1, scales_local, sc, m); float d2 = dall*sc, m2 = dmin*m;
+    uint8_t hm = 1 << (2*il);
+    y[0]  = d1*((ql[0]&0xF) + (qh[0]&hm ? 16 : 0)) - m1;
+    y[1]  = d1*((ql[1]&0xF) + (qh[1]&hm ? 16 : 0)) - m1;
+    hm <<= 1;
+    y[32] = d2*((ql[0]>>4) + (qh[0]&hm ? 16 : 0)) - m2;
+    y[33] = d2*((ql[1]>>4) + (qh[1]&hm ? 16 : 0)) - m2;
+}
+
+int main() {
+    sycl::queue q(sycl::gpu_selector_v);
+    printf("Device: %s\n", q.get_device().get_info<sycl::info::device::name>().c_str());
+    const int ne00 = 2*QK_K;
+    const int ne01 = 8;
+    const int nblocks = ne01*(ne00/QK_K);
+    const int batch = 3;
+    const int ne12 = 1;
+    std::vector<block_q5_K> table(nblocks);
+    for (int b = 0; b < nblocks; b++) {
+        table[b].dm = sycl::half2(sycl::half(1.0f+b*0.1f), sycl::half(0.05f+b*0.01f));
+        for (int i = 0; i < K_SCALE_SIZE; i++) table[b].scales[i] = (uint8_t)((i*5+b*3+1)%64);
+        for (int i = 0; i < QK_K/8; i++) table[b].qh[i] = (uint8_t)((i*7+b)%256);
+        for (int i = 0; i < QK_K/2; i++) table[b].qs[i] = (uint8_t)((i*3+b*2)%256);
+    }
+    std::vector<int32_t> src1 = {0, 3, 7};
+    std::vector<uint8_t> reordered((size_t)nblocks*sizeof(block_q5_K));
+    reorder_q5_K(table.data(), reordered.data(), nblocks);
+    std::vector<float> golden((size_t)batch*ne00, 0.0f);
+    for (int bi = 0; bi < batch; bi++) {
+        int row = src1[bi];
+        std::vector<float> tmp(ne00);
+        dequantize_row_q5_K_host(table.data() + row*(ne00/QK_K), tmp.data(), ne00);
+        memcpy(golden.data()+(size_t)bi*ne00, tmp.data(), ne00*sizeof(float));
+    }
+    uint8_t* d_src = sycl::malloc_device<uint8_t>(reordered.size(), q);
+    q.memcpy(d_src, reordered.data(), reordered.size()).wait();
+    int32_t* d_src1 = sycl::malloc_device<int32_t>(batch, q);
+    q.memcpy(d_src1, src1.data(), batch*sizeof(int32_t)).wait();
+    float* d_dst = sycl::malloc_device<float>((size_t)batch*ne00, q);
+    q.memset(d_dst, 0, (size_t)batch*ne00*sizeof(float)).wait();
+    size_t s1 = ne00;
+    sycl::range<3> block_dims(1, 1, 64);
+    sycl::range<3> block_nums(1, batch, ne00/QK_K);
+    q.submit([&](sycl::handler& cgh) {
+        sycl::local_accessor<uint8_t,1> scale_acc(sycl::range<1>(K_SCALE_SIZE), cgh);
+        cgh.parallel_for(sycl::nd_range<3>(block_nums*block_dims, block_dims),
+            [=](sycl::nd_item<3> item) {
+                k_get_rows_q5_K_reorder(d_src, d_src1, d_dst, ne00, ne01, ne12,
+                    s1, 0, 0, 1, 0, 0, &scale_acc[0], item);
+            });
+    }).wait();
+    std::vector<float> gpu_dst((size_t)batch*ne00);
+    q.memcpy(gpu_dst.data(), d_dst, (size_t)batch*ne00*sizeof(float)).wait();
+    int mism = 0;
+    for (int bi = 0; bi < batch; bi++)
+        for (int i = 0; i < ne00; i++) {
+            float g = golden[(size_t)bi*ne00+i];
+            float v = gpu_dst[(size_t)bi*ne00+i];
+            if (fabsf(g-v) > 1e-3) { if (mism < 5) printf("MISMATCH bi=%d i=%d gpu=%.4f cpu=%.4f\n",bi,i,v,g); mism++; }
+        }
+    printf("mismatches: %d / %d\n", mism, batch*ne00);
+    printf("%s\n", mism==0 ? "ALL OK" : "FAIL");
+    sycl::free(d_src,q); sycl::free(d_src1,q); sycl::free(d_dst,q);
+    return mism==0 ? 0 : 1;
+}
