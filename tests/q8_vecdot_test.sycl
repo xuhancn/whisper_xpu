@@ -17,7 +17,7 @@ constexpr int QK8_0 = 32;
 constexpr int QK8_1 = 32;
 constexpr int WARP_SIZE = 16;
 constexpr int QI8_0 = 8;
-constexpr int VDR_Q8_0_Q8_1_MMVQ = 2;  // from ggml-sycl vecdotq.hpp
+constexpr int VDR_Q8_0_Q8_1_MMVQ = 4;  // REAL value from block_q_t<GGML_TYPE_Q8_0>::vdr_mmvq (quants.hpp)
 constexpr int GGML_SYCL_DMMV_X = 32;
 constexpr int GGML_SYCL_MMV_Y = 1;
 
@@ -42,7 +42,8 @@ static int get_int_from_int8(const int8_t* x8, int i32) {
 }
 
 static int get_int_from_int8_aligned(const int8_t* x8, int i32) {
-    return get_int_from_int8(x8, i32);  // same for our test
+    // Faithful to vecdotq.hpp: 4-byte int read at 4*i32
+    return *((const int*)(x8 + sizeof(int) * i32));
 }
 
 // ── dp4a (from dpct helper) ──
@@ -106,65 +107,83 @@ void quantize_q8_1_soa_gpu(sycl::queue& q, const float* x, void* out, int kx, in
         }).wait();
 }
 
-// ── mul_mat_vec_q_reorder (the actual kernel) ──
-// Simplified: single row, single sub-group
+// ── mul_mat_vec_q_reorder (the actual kernel — EXACT match to mmvq.cpp) ──
+// Uses nd_range<3> + reqd_sub_group_size(WARP_SIZE) + stream->submit
+// to exactly match the real ggml-sycl kernel.
 void mul_mat_vec_q_reorder_gpu(sycl::queue& q, const void* vx, const void* vy,
                                 float* dst, int ncols, int nrows) {
     constexpr int vdr_mmvq = VDR_Q8_0_Q8_1_MMVQ;  // 2
     constexpr int qi = QI8_0;  // 8
-    constexpr int blocks_per_subgroup = (vdr_mmvq * WARP_SIZE + qi - 1) / qi;  // (2*16+8-1)/8 = 5
-    constexpr int block_elements_per_subgroup = qi / vdr_mmvq;  // 8/2 = 4
-    int blocks_per_row = ncols / QK8_0;  // 1280/32 = 40
+    constexpr int blocks_per_subgroup = (vdr_mmvq * WARP_SIZE + qi - 1) / qi;  // 5
+    constexpr int block_elements_per_subgroup = qi / vdr_mmvq;  // 4
+    int blocks_per_row = ncols / QK8_0;  // 40
 
-    q.parallel_for(sycl::nd_range<1>(sycl::range<1>(WARP_SIZE), sycl::range<1>(WARP_SIZE)),
-        [=](sycl::nd_item<1> item) {
-            int row = 0;
-            if (row >= nrows) return;
+    // Match mmvq.cpp exactly: num_subgroups=WARP_SIZE=16, MMV_Y=1
+    constexpr size_t num_subgroups = WARP_SIZE;  // 16
+    constexpr int GGML_SYCL_MMV_Y = 1;
+    int block_num_y = (nrows + GGML_SYCL_MMV_Y * (int)num_subgroups - 1) /
+                      (GGML_SYCL_MMV_Y * (int)num_subgroups);
+    if (block_num_y < 1) block_num_y = 1;
 
-            float partial_sum = 0.0f;
-            for (int i = item.get_local_id(0) / block_elements_per_subgroup;
-                 i < blocks_per_row; i += blocks_per_subgroup) {
-                int ibx = row * blocks_per_row + i;
+    sycl::range<3> block_nums(1, 1, block_num_y);
+    sycl::range<3> block_dims(1, GGML_SYCL_MMV_Y, num_subgroups * WARP_SIZE);
 
-                // bx_offset = ibx * QK8_0
-                int bx_offset = ibx * QK8_0;
-                // d_offset = ncols * nrows + ibx * sizeof(half)
-                int d_offset = ncols * nrows + ibx * sizeof(half);
+    q.submit([&](sycl::handler& cgh) {
+        cgh.parallel_for(sycl::nd_range<3>(block_nums * block_dims, block_dims),
+            [=](sycl::nd_item<3> nd_item) [[sycl::reqd_sub_group_size(WARP_SIZE)]] {
+                const auto sg = nd_item.get_sub_group();
+                const int sg_range = sg.get_group_linear_range();
+                const int workgroup_id = nd_item.get_group_linear_id();
+                const int sg_id = sg.get_group_linear_id();
+                const int row = workgroup_id * sg_range + sg_id;
 
-                // Y
-                int iby = i;  // block_to_q8_1_ratio = 1
-                const int8_t* q8_1_quant_ptr = (const int8_t*)vy + iby * QK8_1;
-                const half2* q8_1_ds_ptr = (const half2*)((const char*)vy + ncols + iby * sizeof(half2));
+                if (row >= nrows) return;
 
-                for (int elem = 0; elem < block_elements_per_subgroup; elem += WARP_SIZE) {
-                    int iqs = elem + vdr_mmvq * (item.get_local_id(0) % block_elements_per_subgroup);
+                const int bpr = ncols / QK8_0;
+                constexpr int bps = (VDR_Q8_0_Q8_1_MMVQ * WARP_SIZE + QI8_0 - 1) / QI8_0;
+                constexpr int beps = QI8_0 / VDR_Q8_0_Q8_1_MMVQ;
 
-                    // vec_dot_q8_0_q8_1 reorder
-                    const uint8_t* base = (const uint8_t*)vx;
-                    const int8_t* qs = (const int8_t*)(base + bx_offset);
-                    const half d = *(const half*)(base + d_offset);
+                float partial_sum = 0.0f;
+                for (int i = sg.get_local_linear_id() / beps; i < bpr; i += bps) {
+                    const int ibx = row * bpr + i;
 
-                    int v[vdr_mmvq];
-                    int u[vdr_mmvq];
-                    for (int ii = 0; ii < vdr_mmvq; ii++) {
-                        v[ii] = get_int_from_int8(qs, iqs + ii);
-                        u[ii] = get_int_from_int8_aligned(q8_1_quant_ptr, iqs + ii);
+                    const int bx_offset = ibx * QK8_0;
+                    const int d_offset = (ncols * nrows) + ibx * sizeof(sycl::half);
+
+                    const int iby = i;
+                    const int8_t* q8_1_quant_ptr = (const int8_t*)vy + iby * QK8_1;
+                    const sycl::half2* q8_1_ds_ptr =
+                        (const sycl::half2*)((const char*)vy + ncols + iby * sizeof(sycl::half2));
+
+                    for (int elem = 0; elem < beps; elem += WARP_SIZE) {
+                        const int iqs = elem + VDR_Q8_0_Q8_1_MMVQ *
+                            (sg.get_local_linear_id() % beps);
+
+                        const uint8_t* base = (const uint8_t*)vx;
+                        const int8_t* qs = (const int8_t*)(base + bx_offset);
+                        const sycl::half d = *(const sycl::half*)(base + d_offset);
+
+                        int v[VDR_Q8_0_Q8_1_MMVQ];
+                        int u[VDR_Q8_0_Q8_1_MMVQ];
+                        for (int ii = 0; ii < VDR_Q8_0_Q8_1_MMVQ; ii++) {
+                            v[ii] = get_int_from_int8(qs, iqs + ii);
+                            u[ii] = get_int_from_int8_aligned(q8_1_quant_ptr, iqs + ii);
+                        }
+
+                        int sumi = 0;
+                        for (int ii = 0; ii < VDR_Q8_0_Q8_1_MMVQ; ii++)
+                            sumi = dp4a(v[ii], u[ii], sumi);
+
+                        const sycl::half2 ds_values = *q8_1_ds_ptr;
+                        partial_sum += (float)d * (float)ds_values[0] * (float)sumi;
                     }
-
-                    int sumi = 0;
-                    for (int ii = 0; ii < vdr_mmvq; ii++)
-                        sumi = dp4a(v[ii], u[ii], sumi);
-
-                    const half2 ds_values = *q8_1_ds_ptr;
-                    partial_sum += (float)d * (float)ds_values[0] * (float)sumi;
                 }
-            }
 
-            // Reduce across sub-group
-            auto sum = sycl::reduce_over_group(item.get_sub_group(), partial_sum, std::plus<>());
-            if (item.get_sub_group().get_local_linear_id() == 0)
-                dst[row] = sum;
-        }).wait();
+                auto sum = sycl::reduce_over_group(nd_item.get_sub_group(), partial_sum, std::plus<>());
+                if (sg.leader())
+                    dst[row] = sum;
+            });
+    }).wait();
 }
 
 int main() {
