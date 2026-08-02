@@ -1,0 +1,211 @@
+// Standalone SYCL test for q8_0 reorder bug.
+// Compile: icx -fsycl -o q8_test q8_reorder_standalone.sycl
+// Run: q8_test
+// (under oneAPI 2025.3 env)
+
+#include <sycl/sycl.hpp>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cmath>
+#include <vector>
+
+using half = sycl::half;
+
+constexpr int QK8_0 = 32;
+constexpr int WARP_SIZE = 16;
+
+struct block_q8_0 {
+    half d;
+    int8_t qs[QK8_0];
+};
+
+// reorder_qw_q8_0: split [d|qs] into [qs section][d section]
+void reorder_qw_q8_0_gpu(sycl::queue& q, uint8_t* data, int ncols, int nrows, size_t size) {
+    uint8_t* tmp = sycl::malloc_device<uint8_t>(size, q);
+    q.memcpy(tmp, data, size).wait();
+
+    auto qs_ptr = data;
+    auto d_ptr = (half*)(qs_ptr + ncols * nrows);
+
+    q.parallel_for(sycl::range<1>(size / sizeof(block_q8_0)),
+        [=](sycl::id<1> i) {
+            const block_q8_0* x = (const block_q8_0*)tmp;
+            const int ib = i[0];
+            for (int j = 0; j < QK8_0; j++) {
+                *((int8_t*)qs_ptr + ib * QK8_0 + j) = x[ib].qs[j];
+            }
+            *(d_ptr + ib) = x[ib].d;
+        }).wait();
+
+    sycl::free(tmp, q);
+}
+
+// dequantize_block_q8_0_reorder: read [qs section][d section] -> float
+void dequantize_q8_0_reorder_gpu(sycl::queue& q, const void* vx, float* y, int64_t k) {
+    constexpr int WARP_K = WARP_SIZE * QK8_0;
+    const int n_warp = (k + WARP_K - 1) / WARP_K;
+
+    q.parallel_for(sycl::nd_range<1>(sycl::range<1>(n_warp * WARP_SIZE),
+                                     sycl::range<1>(WARP_SIZE)),
+        [=](sycl::nd_item<1> item) {
+            const int64_t i = item.get_group(0);
+            const int64_t tid = item.get_local_id(0);
+            const int lane_ib = i * WARP_SIZE + tid;
+
+            if (lane_ib >= k / QK8_0) return;
+
+            float* y_ptr = y + lane_ib * QK8_0;
+            auto qs = (const int8_t*)vx + lane_ib * QK8_0;
+            auto s_ptr = (const half*)((const uint8_t*)vx + k) + lane_ib;
+            const float d = float(*s_ptr);
+
+            for (int l = 0; l < QK8_0; ++l) {
+                y_ptr[l] = d * qs[l];
+            }
+        }).wait();
+}
+
+int main() {
+    // TEST WITH MULTI-ROW (nrows=4) — the standalone test that passed used nrows=1
+    // The actual whisper weight has nrows=1280 — maybe the bug only shows with nrows>1
+    const int ncols = 1280;  // matches whisper weight ne[0]
+    const int nrows = 4;     // multi-row to test
+    const int n_blocks = ncols * nrows / QK8_0;  // 1280*4/32 = 160 blocks
+    const size_t size = n_blocks * sizeof(block_q8_0);
+
+    sycl::queue q(sycl::gpu_selector_v);
+    printf("Device: %s\n", q.get_device().get_info<sycl::info::device::name>().c_str());
+
+    // Create test data — multi-row, each row has ncols/QK8_0 blocks
+    int blocks_per_row = ncols / QK8_0;  // 40
+    std::vector<block_q8_0> blocks(n_blocks);
+    for (int b = 0; b < n_blocks; b++) {
+        blocks[b].d = half(1.0f + b * 0.01f);
+        for (int i = 0; i < QK8_0; i++)
+            blocks[b].qs[i] = (int8_t)(i - 128);
+    }
+
+    // CPU golden — dequantize original layout, multi-row
+    // blocks are stored row-major: block(r, c) = r * blocks_per_row + c
+    std::vector<float> golden(n_blocks * QK8_0);
+    for (int b = 0; b < n_blocks; b++) {
+        float d = float(blocks[b].d);
+        for (int i = 0; i < QK8_0; i++)
+            golden[b * QK8_0 + i] = d * float(blocks[b].qs[i]);
+    }
+    printf("CPU golden first 8: ");
+    for (int i = 0; i < 8; i++) printf("%.1f ", golden[i]);
+    printf("\n");
+
+    // CPU reorder — reorder_qw_q8_0 splits [d|qs] into [qs section][d section]
+    // qs section: all qs values, n_blocks * QK8_0 = ncols * nrows bytes
+    // d section: all d values, n_blocks * sizeof(half) bytes
+    // BUT: the writer uses ib = linear block index (0..n_blocks-1)
+    // The reader uses ibx = row * blocks_per_row + col_block
+    // These are the SAME for row-major storage.
+    std::vector<uint8_t> cpu_reordered(size);
+    for (int b = 0; b < n_blocks; b++) {
+        // qs at offset b * QK8_0 (linear block index * 32)
+        memcpy(cpu_reordered.data() + b * QK8_0, blocks[b].qs, QK8_0);
+        // d at offset (ncols * nrows) + b * sizeof(half)
+        memcpy(cpu_reordered.data() + ncols * nrows + b * sizeof(half), &blocks[b].d, sizeof(half));
+    }
+
+    // GPU: alloc + copy + reorder
+    uint8_t* gpu_data = sycl::malloc_device<uint8_t>(size, q);
+    q.memcpy(gpu_data, blocks.data(), size).wait();
+    reorder_qw_q8_0_gpu(q, gpu_data, ncols, nrows, size);
+
+    // Copy reordered back
+    std::vector<uint8_t> gpu_reordered(size);
+    q.memcpy(gpu_reordered.data(), gpu_data, size).wait();
+
+    // Compare reorder layouts
+    printf("\n=== Reorder comparison ===\n");
+    bool reorder_match = (memcmp(cpu_reordered.data(), gpu_reordered.data(), size) == 0);
+    printf("GPU reorder == CPU reorder: %s\n", reorder_match ? "YES" : "NO");
+    if (!reorder_match) {
+        printf("CPU first 32 bytes: ");
+        for (int i = 0; i < 32; i++) printf("%02x ", (unsigned char)cpu_reordered[i]);
+        printf("\nGPU first 32 bytes: ");
+        for (int i = 0; i < 32; i++) printf("%02x ", (unsigned char)gpu_reordered[i]);
+        printf("\n");
+        int d_off = ncols * nrows;
+        printf("CPU d section first 8: ");
+        for (int i = 0; i < 8; i++) printf("%02x ", (unsigned char)cpu_reordered[d_off + i]);
+        printf("\nGPU d section first 8: ");
+        for (int i = 0; i < 8; i++) printf("%02x ", (unsigned char)gpu_reordered[d_off + i]);
+        printf("\n");
+    }
+
+    // GPU dequantize
+    float* gpu_output = sycl::malloc_device<float>(n_blocks * QK8_0, q);
+    dequantize_q8_0_reorder_gpu(q, gpu_data, gpu_output, ncols * nrows);
+    std::vector<float> gpu_result(n_blocks * QK8_0);
+    q.memcpy(gpu_result.data(), gpu_output, n_blocks * QK8_0 * sizeof(float)).wait();
+
+    printf("\n=== Dequant comparison ===\n");
+    printf("GPU dequant first 8: ");
+    for (int i = 0; i < 8; i++) printf("%.1f ", gpu_result[i]);
+    printf("\n");
+    bool dequant_match = true;
+    int first_mismatch = -1;
+    for (int i = 0; i < n_blocks * QK8_0; i++) {
+        if (fabsf(gpu_result[i] - golden[i]) > 0.01f) {
+            dequant_match = false;
+            first_mismatch = i;
+            break;
+        }
+    }
+    printf("GPU dequant == CPU golden: %s\n", dequant_match ? "YES" : "NO");
+    if (!dequant_match) {
+        printf("First mismatch at %d: GPU=%.4f CPU=%.4f\n",
+               first_mismatch, gpu_result[first_mismatch], golden[first_mismatch]);
+    }
+
+    // Isolation: GPU reorder → CPU dequant
+    printf("\n=== Isolation ===\n");
+    std::vector<float> iso_dequant(n_blocks * QK8_0);
+    for (int b = 0; b < n_blocks; b++) {
+        const int8_t* qs = (const int8_t*)gpu_reordered.data() + b * QK8_0;
+        const half* d_ptr = (const half*)(gpu_reordered.data() + ncols * nrows) + b;
+        float d = float(*d_ptr);
+        for (int i = 0; i < QK8_0; i++)
+            iso_dequant[b * QK8_0 + i] = d * float(qs[i]);
+    }
+    bool iso_match = true;
+    for (int i = 0; i < n_blocks * QK8_0; i++) {
+        if (fabsf(iso_dequant[i] - golden[i]) > 0.01f) { iso_match = false; break; }
+    }
+    printf("GPU reorder + CPU dequant == golden: %s\n", iso_match ? "YES" : "NO");
+    if (!iso_match) printf("→ REORDER kernel is buggy\n");
+    else printf("→ Reorder correct, DEQUANTIZE kernel is buggy\n");
+
+    // Isolation 2: CPU reorder → GPU dequant
+    uint8_t* gpu_cpu_reordered = sycl::malloc_device<uint8_t>(size, q);
+    q.memcpy(gpu_cpu_reordered, cpu_reordered.data(), size).wait();
+    float* gpu_dequant2 = sycl::malloc_device<float>(n_blocks * QK8_0, q);
+    dequantize_q8_0_reorder_gpu(q, gpu_cpu_reordered, gpu_dequant2, ncols * nrows);
+    std::vector<float> gpu_dequant2_result(n_blocks * QK8_0);
+    q.memcpy(gpu_dequant2_result.data(), gpu_dequant2, n_blocks * QK8_0 * sizeof(float)).wait();
+    bool dequant2_match = true;
+    for (int i = 0; i < n_blocks * QK8_0; i++) {
+        if (fabsf(gpu_dequant2_result[i] - golden[i]) > 0.01f) { dequant2_match = false; break; }
+    }
+    printf("CPU reorder + GPU dequant == golden: %s\n", dequant2_match ? "YES" : "NO");
+    if (!dequant2_match) printf("→ DEQUANTIZE kernel is buggy\n");
+
+    sycl::free(gpu_data, q);
+    sycl::free(gpu_output, q);
+    sycl::free(gpu_cpu_reordered, q);
+    sycl::free(gpu_dequant2, q);
+
+    printf("\n=== Summary ===\n");
+    if (!reorder_match) printf("BUG: reorder_qw_q8_0 writes wrong layout\n");
+    if (!dequant2_match) printf("BUG: dequantize_block_q8_0_reorder reads wrong\n");
+    if (reorder_match && dequant2_match && dequant_match)
+        printf("NO BUG - GPU matches CPU golden\n");
+
+    return 0;
+}
